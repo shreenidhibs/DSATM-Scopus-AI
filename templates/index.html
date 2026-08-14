@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#10264a" />
+  <title>DSATM Research Intelligence | Faculty Scopus Analytics</title>
+  <link rel="stylesheet" href="/static/style.css?v=6" />
+</head>
+
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="institution-brand">
+        <img src="/static/dsi-logo.png" alt="Dayananda Sagar Academy of Technology and Management logo" />
+        <div>
+          <h1>DSATM Research</h1>
+          <p>Scopus Intelligence</p>
+        </div>
+      </div>
+
+      <div class="nav-label">QUICK ACTIONS</div>
+      <div class="sidebar-actions">
+        <button id="homeBtn" class="side-action active"><span>⌂</span><b>Home</b></button>
+        <button id="changeDatasetBtn" class="side-action"><span>⇄</span><b>Data Source / Upload</b></button>
+        <button id="sideSummaryBtn" class="side-action" disabled><span>▦</span><b>Institution Summary</b></button>
+      </div>
+
+      <div class="nav-label faculty-nav-label">FACULTY DIRECTORY</div>
+      <div class="faculty-picker">
+        <select id="departmentFilter" class="department-filter" disabled>
+          <option value="">All Departments</option>
+        </select>
+        <select id="searchBy" class="department-filter search-by-filter" disabled>
+          <option value="faculty">Search By: Faculty Name</option>
+          <option value="scopus_id">Search By: Scopus Author ID</option>
+        </select>
+        <div class="search-box dark-search"><span>⌕</span><input id="facultySearch" placeholder="Enter faculty name…"
+            disabled /></div>
+        <div id="facultyMeta" class="faculty-meta">Upload a dataset to begin</div>
+        <div id="facultyList" class="faculty-list"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="system-status"><span class="pulse-dot"></span>
+          <div><strong>Institution workspace</strong><small>Scopus analytics dashboard</small></div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-brand"><img src="/static/dsi-logo.png" alt="DSI logo" />
+          <div><strong>Dayananda Sagar Academy of Technology and Management</strong><small>Faculty Research
+              Analytics</small></div>
+        </div>
+        <div class="top-actions">
+          <button id="summaryBtn" class="icon-btn" disabled><span>▦</span> Institution</button>
+          <button id="reportBtn" class="icon-btn" disabled><span>▣</span> Research Report</button>
+          <button id="exportBtn" class="export-btn" disabled><span>⇩</span> Export Excel</button>
+        </div>
+      </header>
+
+      <section id="welcome" class="welcome-view campus-home">
+        <div class="campus-banner-wrap">
+          <img src="/static/campus-banner.jpg" alt="Dayananda Sagar Academy of Technology and Management campus"
+            class="campus-banner" />
+          <div class="campus-banner-overlay"></div>
+          <div class="banner-brand"><img src="/static/dsi-logo.png" alt="DSI">
+            <div><strong>Dayananda Sagar Academy of Technology and Management</strong><span>Faculty Research
+                Intelligence Portal</span></div>
+          </div>
+        </div>
+
+        <div class="home-center">
+          <div class="home-tool-icon">📚</div>
+          <h2>Faculty Scopus <span>AI</span></h2>
+          <p>Smart Faculty Publication & Citation Analytics System</p>
+
+          <div class="login-panel live-login-panel">
+            <div class="field-title">Select Data Source</div>
+            <div class="source-toggle">
+              <button id="modeLiveBtn" class="source-mode active" type="button"><span>🌐</span>
+                <div><b>Live Scopus</b><small>Latest data through Elsevier API</small></div>
+              </button>
+              <button id="modeExcelBtn" class="source-mode" type="button"><span>📊</span>
+                <div><b>Excel Data</b><small>Upload Scopus XLS / XLSX export</small></div>
+              </button>
+            </div>
+
+            <div id="liveSourcePanel" class="source-panel-home">
+              <div class="api-status-row"><span id="apiStatusDot" class="api-dot"></span><span
+                  id="apiStatusText">Checking Scopus API connection…</span><button id="recheckApiBtn"
+                  type="button">Check</button></div>
+              <div class="field-title live-field-title">Search Live Scopus By</div>
+              <div class="live-search-method">
+                <button id="liveByNameBtn" class="live-method active" type="button">Faculty Name</button>
+                <button id="liveByIdBtn" class="live-method" type="button">Scopus Author ID</button>
+              </div>
+              <div id="liveNamePanel">
+                <div class="live-id-input"><span>⌕</span><input id="liveAuthorName" autocomplete="off"
+                    placeholder="Enter faculty name, e.g. Shreenidhi B S" /></div>
+              </div>
+              <div id="liveIdPanel" class="hidden">
+                <div class="live-id-input"><span>⌕</span><input id="liveAuthorId" inputmode="numeric" autocomplete="off"
+                    placeholder="Enter Scopus Author ID, e.g. 60057735400" /></div>
+              </div>
+              <button id="liveSearchBtn" class="home-primary-btn"><span>Search Live Scopus</span><b>→</b></button>
+              <div id="liveAuthorMatches" class="live-author-matches hidden"></div>
+              <div id="liveStatus" class="home-status"><i></i><span>Search by faculty name or Scopus Author ID</span>
+              </div>
+            </div>
+
+            <div id="excelSourcePanel" class="source-panel-home hidden">
+              <div class="field-title live-field-title">Institution Keyword</div>
+              <textarea id="institutionKeyword" rows="2">Dayananda Sagar Academy of Technology and Management</textarea>
+
+              <label class="home-file-box" for="excelFile">
+                <input id="excelFile" type="file" accept=".xls,.xlsx" hidden />
+                <span class="home-file-icon">⇧</span>
+                <div><strong id="fileLabel">Choose Scopus Excel File</strong><small>XLS or XLSX publication
+                    export</small></div>
+              </label>
+
+              <button id="uploadBtn" class="home-primary-btn"><span>Analyze Excel Data</span><b>→</b></button>
+              <button id="refreshScopusExcelBtn" class="home-primary-btn" type="button" disabled><span>Refresh Excel
+                  from Live Scopus</span><b>↻</b></button>
+              <div id="uploadStatus" class="home-status"><i></i><span>Secure institutional data processing</span></div>
+            </div>
+          </div>
+
+          <div class="home-button-row">
+            <button id="openDashboardBtn" class="home-menu-btn" disabled><span>👤</span>
+              <div><strong>Faculty Dashboard</strong><small>Select and analyze faculty</small></div>
+            </button>
+            <button id="homeSummaryBtn" class="home-menu-btn" disabled><span>▦</span>
+              <div><strong>Institution Summary</strong><small>Faculty ranking & totals</small></div>
+            </button>
+            <button id="homeHelpBtn" class="home-menu-btn"><span>?</span>
+              <div><strong>How It Works</strong><small>Live API / Excel → Search → Analyze</small></div>
+            </button>
+          </div>
+
+          <div class="secure-note">🔒 Secure Institutional Research Analytics</div>
+        </div>
+      </section>
+
+      <section id="dashboard" class="hidden dashboard-view">
+        <article class="profile-hero">
+          <div class="profile-main">
+            <div class="faculty-photo-shell">
+              <div id="facultyAvatar" class="faculty-avatar">FC</div><label class="photo-upload"
+                title="Optional local photo preview">＋<input id="facultyPhoto" type="file" accept="image/*"
+                  hidden></label>
+            </div>
+            <div class="profile-copy">
+              <div class="profile-label">FACULTY RESEARCH PROFILE</div>
+              <h1 id="pageTitle">Faculty Name</h1>
+              <p id="pageSubtitle">Scopus-indexed publication profile and citation analytics.</p>
+              <div class="profile-tags"><span id="dataSourceTag">Excel Dataset</span><span
+                  id="departmentTag">Department</span><span id="profilePeriod">Publication analytics</span><span
+                  id="scopusIdTag">Scopus ID: —</span></div>
+            </div>
+          </div>
+          <div class="profile-score"><img src="/static/dsi-logo.png" alt="DSI">
+            <div><small>Research Records</small><strong id="heroRecordCount">0</strong><span>indexed entries</span>
+            </div>
+          </div>
+        </article>
+
+        <div class="kpi-grid six">
+          <article class="kpi kpi-blue">
+            <div class="kpi-icon">▤</div>
+            <div><span>Publications</span><strong id="kpiPublications">0</strong><small>Scopus records</small></div>
+          </article>
+          <article class="kpi kpi-purple">
+            <div class="kpi-icon">↗</div>
+            <div><span>Total Citations</span><strong id="kpiCitations">0</strong><small>Dataset citation impact</small>
+            </div>
+          </article>
+          <article class="kpi kpi-green">
+            <div class="kpi-icon">h</div>
+            <div><span>Local h-index</span><strong id="kpiHIndex">0</strong><small>From uploaded records</small></div>
+          </article>
+          <article class="kpi kpi-orange">
+            <div class="kpi-icon">◎</div>
+            <div><span>Co-authors</span><strong id="kpiCoauthors">0</strong><small>Unique collaborators</small></div>
+          </article>
+          <article class="kpi kpi-cyan">
+            <div class="kpi-icon">◷</div>
+            <div><span>Latest Year</span><strong id="kpiYear">—</strong><small id="kpiYearCount">0 publications</small>
+            </div>
+          </article>
+          <article class="kpi kpi-rose">
+            <div class="kpi-icon">◉</div>
+            <div><span>Unique Sources</span><strong id="kpiSources">0</strong><small>Journals & proceedings</small>
+            </div>
+          </article>
+        </div>
+
+        <div class="analytics-grid three">
+          <article class="panel trend-panel">
+            <div class="panel-head">
+              <div><span class="panel-kicker">PUBLICATION TREND</span>
+                <h3>Research output by year</h3>
+                <p>Indexed publications across available years.</p>
+              </div>
+              <div class="legend"><i></i> Publications</div>
+            </div>
+            <canvas id="yearChart" width="760" height="300"></canvas>
+          </article>
+          <article class="panel source-panel">
+            <div class="panel-head">
+              <div><span class="panel-kicker">TOP SOURCES</span>
+                <h3>Publication sources</h3>
+                <p>Most frequent journals and proceedings.</p>
+              </div>
+            </div>
+            <div id="sourceBars" class="source-bars"></div>
+          </article>
+          <article class="panel mix-panel">
+            <div class="panel-head">
+              <div><span class="panel-kicker">OUTPUT MIX</span>
+                <h3>Journal vs Conference</h3>
+                <p>Document-type distribution.</p>
+              </div>
+            </div>
+            <div id="mixDonut" class="mix-donut">
+              <div class="donut">
+                <div><strong id="mixTotal">0</strong><span>Total</span></div>
+              </div>
+            </div>
+            <div id="mixLegend" class="mix-legend"></div>
+          </article>
+        </div>
+
+        <article class="panel publication-panel">
+          <div class="panel-head publication-head">
+            <div><span class="panel-kicker">PUBLICATION LIBRARY</span>
+              <h3>Publication details</h3>
+              <p id="resultCount">0 records</p>
+            </div>
+            <div class="table-tools">
+              <div class="search-box"><span>⌕</span><input id="publicationSearch"
+                  placeholder="Search title, source, DOI…" /></div><select id="yearFilter">
+                <option value="">All years</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Publication</th>
+                  <th>Year</th>
+                  <th>Source</th>
+                  <th>Citations</th>
+                  <th>Type</th>
+                  <th>Access</th>
+                </tr>
+              </thead>
+              <tbody id="publicationBody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="summaryView" class="hidden summary-view">
+        <div class="summary-titlebar">
+          <div><span class="hero-badge">DSATM • INSTITUTION ANALYTICS</span>
+            <h1>Institution Summary</h1>
+            <p>Overall Scopus publication, citation, source and faculty research performance from the uploaded dataset.
+            </p>
+          </div><button id="backDashboard" class="back-btn">← Back to Faculty</button>
+        </div>
+        <div class="summary-stats summary-stats-wide">
+          <article><span>Faculty Detected</span><strong id="sumFaculty">0</strong><small>Institution authors</small>
+          </article>
+          <article><span>Indexed Publications</span><strong id="sumRecords">0</strong><small>Unique Excel
+              records</small></article>
+          <article><span>Total Citations</span><strong id="sumCitations">0</strong><small>Across indexed records</small>
+          </article>
+          <article><span>Journal Papers</span><strong id="sumJournals">0</strong><small>Articles / reviews</small>
+          </article>
+          <article><span>Conference Papers</span><strong id="sumConferences">0</strong><small>Conference
+              documents</small></article>
+          <article><span>Departments</span><strong id="sumDepartments">0</strong><small>Detected departments</small>
+          </article>
+          <article><span>Unique Sources</span><strong id="sumSources">0</strong><small>Journals / proceedings</small>
+          </article>
+          <article><span>Latest Publication Year</span><strong id="sumLatestYear">—</strong><small>Most recent indexed
+              year</small></article>
+        </div>
+        <div class="summary-overview-grid">
+          <article class="panel overview-card">
+            <div class="panel-head">
+              <div><span class="panel-kicker">LEADER</span>
+                <h3>Top Faculty</h3>
+                <p>Highest publication count in the current selection.</p>
+              </div>
+            </div>
+            <div class="overview-leader"><span>★</span><strong id="sumLeader">—</strong></div>
+          </article>
+          <article class="panel overview-card">
+            <div class="panel-head">
+              <div><span class="panel-kicker">DEPARTMENTS</span>
+                <h3>Faculty Distribution</h3>
+                <p>Faculty detected across departments.</p>
+              </div>
+            </div>
+            <div id="summaryDeptBars" class="overview-bars"></div>
+          </article>
+          <article class="panel overview-card">
+            <div class="panel-head">
+              <div><span class="panel-kicker">TREND</span>
+                <h3>Publications by Year</h3>
+                <p>Institution-wide indexed output.</p>
+              </div>
+            </div>
+            <div id="summaryYearBars" class="overview-bars"></div>
+          </article>
+        </div>
+        <article class="panel summary-panel">
+          <div class="panel-head summary-head">
+            <div><span class="panel-kicker">RANKING</span>
+              <h3>Faculty research performance</h3>
+              <p>Ranked by publication count, followed by citation count.</p>
+            </div>
+            <div class="summary-tools"><select id="summaryDepartment">
+                <option value="">All Departments</option>
+              </select>
+              <div class="search-box"><span>⌕</span><input id="summarySearch" placeholder="Search faculty…" /></div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="summary-table">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Faculty</th>
+                  <th>Department</th>
+                  <th>Publications</th>
+                  <th>Citations</th>
+                  <th>Profile</th>
+                </tr>
+              </thead>
+              <tbody id="summaryBody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js?v=8"></script>
+</body>
+
+</html>
