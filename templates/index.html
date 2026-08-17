@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#10264a" />
   <title>DSATM Research Intelligence | Faculty Scopus Analytics</title>
-  <link rel="stylesheet" href="/static/style.css?v=6" />
+  <link rel="stylesheet" href="/static/style.css?v=8" />
 </head>
 
 <body>
@@ -107,9 +107,25 @@
                     placeholder="Enter Scopus Author ID, e.g. 60057735400" /></div>
               </div>
               <button id="liveSearchBtn" class="home-primary-btn"><span>Search Live Scopus</span><b>→</b></button>
-              <div id="liveAuthorMatches" class="live-author-matches hidden"></div>
-              <div id="liveStatus" class="home-status"><i></i><span>Search by faculty name or Scopus Author ID</span>
+
+              <div id="authorDirectoryProgress" class="author-directory-progress hidden">
+                <div class="author-directory-progress-head">
+                  <span id="authorDirectoryProgressTitle">DSATM Author Directory</span>
+                  <strong id="authorDirectoryProgressPercent">0%</strong>
+                </div>
+                <div class="author-directory-progress-track">
+                  <div id="authorDirectoryProgressBar" class="author-directory-progress-bar"></div>
+                </div>
+                <div id="authorDirectoryProgressMessage" class="author-directory-progress-message">
+                  Directory is loaded automatically from DSATM_Author_Directory.xlsx
+                </div>
+                <div id="authorDirectoryProgressMeta" class="author-directory-progress-meta">
+                  Publications: 0 / 0 • Authors found: 0
+                </div>
               </div>
+
+              <div id="liveAuthorMatches" class="live-author-matches hidden"></div>
+              <div id="liveStatus" class="home-status"><i></i><span>Search by faculty name or Scopus Author ID</span></div>
             </div>
 
             <div id="excelSourcePanel" class="source-panel-home hidden">
@@ -124,8 +140,7 @@
               </label>
 
               <button id="uploadBtn" class="home-primary-btn"><span>Analyze Excel Data</span><b>→</b></button>
-              <button id="refreshScopusExcelBtn" class="home-primary-btn" type="button" disabled><span>Refresh Excel
-                  from Live Scopus</span><b>↻</b></button>
+              <button id="refreshScopusExcelBtn" class="home-primary-btn" type="button" disabled><span>Refresh Excel from Live Scopus</span><b>↻</b></button>
               <div id="uploadStatus" class="home-status"><i></i><span>Secure institutional data processing</span></div>
             </div>
           </div>
@@ -354,7 +369,7 @@
     </main>
   </div>
   <div id="toast" class="toast"></div>
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 
 </html>

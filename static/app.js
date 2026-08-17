@@ -166,1212 +166,265 @@ checkScopusApi();
 
 /* ==========================================================
    LIVE SCOPUS SEARCH
-   Search by Faculty Name OR Scopus Author ID
 ========================================================== */
 
 let liveSearchMode = 'name';
 
-
-/* ----------------------------------------------------------
-   SAFE ELEMENT HELPERS
----------------------------------------------------------- */
-
-function liveEl(id) {
-  return document.getElementById(id);
-}
-
-
-function setLiveSearchButtonLoading(message) {
-
-  const btn = liveEl('liveSearchBtn');
-
-  if (!btn) {
-    return;
-  }
-
-  btn.disabled = true;
-
-  btn.innerHTML =
-    `<span>${esc(message)}</span><b>•••</b>`;
-}
-
-
-function resetLiveSearchButton() {
-
-  const btn = liveEl('liveSearchBtn');
-
-  if (!btn) {
-    return;
-  }
-
-  btn.disabled = false;
-
-  btn.innerHTML =
-    '<span>Search Live Scopus</span><b>→</b>';
-}
-
-
-/* ----------------------------------------------------------
-   SEARCH MODE BUTTONS
----------------------------------------------------------- */
-
-if (liveEl('liveByNameBtn')) {
-
-  liveEl('liveByNameBtn').addEventListener(
-    'click',
-    () => setLiveSearchMode('name')
-  );
-}
-
-
-if (liveEl('liveByIdBtn')) {
-
-  liveEl('liveByIdBtn').addEventListener(
-    'click',
-    () => setLiveSearchMode('id')
-  );
-}
-
-
-if (liveEl('liveSearchBtn')) {
-
-  liveEl('liveSearchBtn').addEventListener(
-    'click',
-    searchLiveScopus
-  );
-}
-
-
-/* ----------------------------------------------------------
-   ENTER KEY SUPPORT
----------------------------------------------------------- */
-
-if (liveEl('liveAuthorId')) {
-
-  liveEl('liveAuthorId').addEventListener(
-    'keydown',
-    e => {
-
-      if (e.key === 'Enter') {
-        searchLiveScopus();
-      }
-    }
-  );
-}
-
-
-if (liveEl('liveAuthorName')) {
-
-  liveEl('liveAuthorName').addEventListener(
-    'keydown',
-    e => {
-
-      if (e.key === 'Enter') {
-        searchLiveScopus();
-      }
-    }
-  );
-}
-
-
-/* ----------------------------------------------------------
-   CHANGE SEARCH MODE
----------------------------------------------------------- */
+$('liveByNameBtn').addEventListener('click', () => setLiveSearchMode('name'));
+$('liveByIdBtn').addEventListener('click', () => setLiveSearchMode('id'));
+$('liveSearchBtn').addEventListener('click', searchLiveScopus);
+$('liveAuthorId').addEventListener('keydown', e => { if (e.key === 'Enter') searchLiveScopus(); });
+$('liveAuthorName').addEventListener('keydown', e => { if (e.key === 'Enter') searchLiveScopus(); });
 
 function setLiveSearchMode(mode) {
-
-  liveSearchMode =
-    mode === 'id'
-      ? 'id'
-      : 'name';
-
-
-  /* ---------------------------------------
-     NAME BUTTON
-  --------------------------------------- */
-
-  if (liveEl('liveByNameBtn')) {
-
-    liveEl('liveByNameBtn')
-      .classList
-      .toggle(
-        'active',
-        liveSearchMode === 'name'
-      );
-  }
-
-
-  /* ---------------------------------------
-     ID BUTTON
-  --------------------------------------- */
-
-  if (liveEl('liveByIdBtn')) {
-
-    liveEl('liveByIdBtn')
-      .classList
-      .toggle(
-        'active',
-        liveSearchMode === 'id'
-      );
-  }
-
-
-  /* ---------------------------------------
-     NAME SEARCH PANEL
-  --------------------------------------- */
-
-  if (liveEl('liveNamePanel')) {
-
-    liveEl('liveNamePanel')
-      .classList
-      .toggle(
-        'hidden',
-        liveSearchMode !== 'name'
-      );
-  }
-
-
-  /* ---------------------------------------
-     AUTHOR ID SEARCH PANEL
-  --------------------------------------- */
-
-  if (liveEl('liveIdPanel')) {
-
-    liveEl('liveIdPanel')
-      .classList
-      .toggle(
-        'hidden',
-        liveSearchMode !== 'id'
-      );
-  }
-
-
-  /* ---------------------------------------
-     CLEAR PREVIOUS AUTHOR MATCHES
-  --------------------------------------- */
-
-  if (liveEl('liveAuthorMatches')) {
-
-    liveEl('liveAuthorMatches')
-      .classList
-      .add('hidden');
-
-    liveEl('liveAuthorMatches')
-      .innerHTML = '';
-  }
-
-
-  /* ---------------------------------------
-     STATUS MESSAGE
-  --------------------------------------- */
-
-  if (liveEl('liveStatus')) {
-
-    liveEl('liveStatus')
-      .classList
-      .remove('loaded');
-
-
-    liveEl('liveStatus').innerHTML =
-
-      liveSearchMode === 'name'
-
-        ? '<i></i><span>Enter faculty name to find matching Scopus authors.</span>'
-
-        : '<i></i><span>Enter the numeric Scopus Author ID.</span>';
-  }
-
-
-  /* ---------------------------------------
-     AUTO FOCUS
-  --------------------------------------- */
-
-  setTimeout(
-    () => {
-
-      if (
-        liveSearchMode === 'name' &&
-        liveEl('liveAuthorName')
-      ) {
-
-        liveEl('liveAuthorName')
-          .focus();
-
-      }
-
-      else if (
-        liveSearchMode === 'id' &&
-        liveEl('liveAuthorId')
-      ) {
-
-        liveEl('liveAuthorId')
-          .focus();
-      }
-
-    },
-    100
-  );
+  liveSearchMode = mode;
+  $('liveByNameBtn').classList.toggle('active', mode === 'name');
+  $('liveByIdBtn').classList.toggle('active', mode === 'id');
+  $('liveNamePanel').classList.toggle('hidden', mode !== 'name');
+  $('liveIdPanel').classList.toggle('hidden', mode !== 'id');
+  $('liveAuthorMatches').classList.add('hidden');
+  $('liveAuthorMatches').innerHTML = '';
+  $('liveStatus').innerHTML = '<i></i><span>' + (mode === 'name' ? 'Enter faculty name to find matching Scopus authors' : 'Enter the numeric Scopus Author ID') + '</span>';
 }
-
-
-/* ==========================================================
-   MAIN LIVE SCOPUS SEARCH
-========================================================== */
 
 async function searchLiveScopus() {
-
-  /* ---------------------------------------
-     SEARCH BY FACULTY NAME
-  --------------------------------------- */
-
   if (liveSearchMode === 'name') {
-
     return searchLiveScopusByName();
   }
-
-
-  /* ---------------------------------------
-     SEARCH BY SCOPUS AUTHOR ID
-  --------------------------------------- */
-
-  const input =
-    liveEl('liveAuthorId');
-
-
-  const authorId =
-
-    (input?.value || '')
-
-      .trim()
-
-      .replace(
-        /\s+/g,
-        ''
-      );
-
-
-  /* ---------------------------------------
-     VALIDATE AUTHOR ID
-  --------------------------------------- */
-
+  const authorId = $('liveAuthorId').value.trim().replace(/\s+/g, '');
   if (!/^\d+$/.test(authorId)) {
-
-    toast(
-      'Enter a valid numeric Scopus Author ID.'
-    );
-
+    toast('Enter a valid numeric Scopus Author ID.');
     return;
   }
-
-
-  /* ---------------------------------------
-     LOAD AUTHOR
-  --------------------------------------- */
-
-  return loadLiveScopusAuthor(
-    authorId
-  );
+  return loadLiveScopusAuthor(authorId);
 }
 
+function setAuthorDirectoryProgressVisible(visible) {
+  const box = $('authorDirectoryProgress');
+  if (!box) return;
+  box.classList.toggle('hidden', !visible);
+}
 
-/* ==========================================================
-   SEARCH SCOPUS BY FACULTY NAME
-========================================================== */
+function renderAuthorDirectoryProgress(p) {
+  setAuthorDirectoryProgressVisible(true);
 
-/* ==========================================================
-   SEARCH LIVE SCOPUS BY FACULTY NAME
-   Uses uploaded DSATM Excel faculty directory
-========================================================== */
+  const percent = Math.max(0, Math.min(100, Number(p.percent || 0)));
+  const current = Number(p.current || 0);
+  const total = Number(p.total || 0);
+  const authors = Number(p.authors_found || p.cached_authors || 0);
+
+  $('authorDirectoryProgressPercent').textContent = `${percent}%`;
+  $('authorDirectoryProgressBar').style.width = `${percent}%`;
+  $('authorDirectoryProgressMessage').textContent =
+    p.message || 'Building DSATM Author Directory...';
+
+  $('authorDirectoryProgressMeta').textContent =
+    `Publications: ${current} / ${total || '—'} • Authors found: ${authors}`;
+
+  if (p.stage === 'complete') {
+    $('authorDirectoryProgressTitle').textContent = 'DSATM Author Directory Ready';
+  } else if (p.stage === 'error') {
+    $('authorDirectoryProgressTitle').textContent = 'Author Directory Build Failed';
+  } else {
+    $('authorDirectoryProgressTitle').textContent = 'Building DSATM Author Directory...';
+  }
+}
+
+async function waitForAuthorDirectoryBuild() {
+  while (true) {
+    const r = await fetch('/api/scopus/author-directory-progress');
+    let p = {};
+
+    try {
+      p = await r.json();
+    } catch (_) {
+      throw new Error('Unable to read author-directory build progress.');
+    }
+
+    if (!r.ok) {
+      throw new Error(p.detail || p.error || 'Unable to read author-directory build progress.');
+    }
+
+    renderAuthorDirectoryProgress(p);
+
+    if (p.stage === 'error' || p.error) {
+      throw new Error(p.error || p.message || 'Unable to build DSATM Author Directory.');
+    }
+
+    if (p.directory_ready && !p.running) {
+      return p;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+}
+
+async function ensureAuthorDirectoryReady() {
+  const statusResponse = await fetch('/api/scopus/author-directory-status');
+
+  let status = {};
+
+  try {
+    status = await statusResponse.json();
+  } catch (_) {
+    throw new Error('Unable to check DSATM Author Directory.');
+  }
+
+  if (!statusResponse.ok) {
+    throw new Error(
+      status.detail ||
+      status.error ||
+      'Unable to check DSATM Author Directory.'
+    );
+  }
+
+  if (!status.directory_ready) {
+    throw new Error(
+      'DSATM_Author_Directory.xlsx is missing from the project root. ' +
+      'Copy the supplied author directory Excel beside app.py and restart the server.'
+    );
+  }
+
+  setAuthorDirectoryProgressVisible(false);
+
+  return status;
+}
 
 async function searchLiveScopusByName() {
-
-  const input =
-    liveEl('liveAuthorName');
-
-
-  const name =
-    (input?.value || '')
-      .trim()
-      .replace(/\s+/g, ' ');
-
-
-  /* -------------------------------------------------------
-     VALIDATE NAME
-  ------------------------------------------------------- */
+  const name = $('liveAuthorName').value.trim().replace(/\s+/g, ' ');
 
   if (name.length < 2) {
-
-    toast(
-      'Enter at least 2 characters of the faculty name.'
-    );
-
+    toast('Enter at least 2 characters of the faculty name.');
     return;
   }
 
+  $('liveSearchBtn').disabled = true;
+  $('liveSearchBtn').innerHTML =
+    '<span>Checking faculty directory…</span><b>•••</b>';
 
-  /* -------------------------------------------------------
-     CHECK WHETHER EXCEL DIRECTORY IS AVAILABLE
-  ------------------------------------------------------- */
-
-  if (
-    !Array.isArray(facultyMeta) ||
-    facultyMeta.length === 0
-  ) {
-
-    if (liveEl('liveStatus')) {
-
-      liveEl('liveStatus')
-        .classList
-        .remove('loaded');
-
-
-      liveEl('liveStatus').innerHTML =
-
-        '<i></i>' +
-
-        '<span>' +
-
-        'Faculty directory is not loaded. ' +
-
-        'Upload the DSATM Scopus Excel file first, ' +
-
-        'or search directly using Scopus Author ID.' +
-
-        '</span>';
-    }
-
-
-    toast(
-      'Upload the DSATM Scopus Excel file first.'
-    );
-
-    return;
-  }
-
-
-  /* -------------------------------------------------------
-     SHOW SEARCHING STATUS
-  ------------------------------------------------------- */
-
-  setLiveSearchButtonLoading(
-    'Searching faculty directory…'
-  );
-
-
-  if (liveEl('liveStatus')) {
-
-    liveEl('liveStatus')
-      .classList
-      .remove('loaded');
-
-
-    liveEl('liveStatus').innerHTML =
-
-      '<i></i>' +
-
-      '<span>' +
-
-      'Searching DSATM faculty directory…' +
-
-      '</span>';
-  }
-
+  $('liveStatus').classList.remove('loaded');
+  $('liveAuthorMatches').classList.add('hidden');
+  $('liveAuthorMatches').innerHTML = '';
 
   try {
+    await ensureAuthorDirectoryReady();
 
-    /* =====================================================
-       NORMALIZE SEARCH TEXT
-    ===================================================== */
+    $('liveSearchBtn').innerHTML =
+      '<span>Searching faculty directory…</span><b>•••</b>';
 
-    const query =
-      name.toLowerCase();
+    $('liveStatus').innerHTML =
+      '<i></i><span>Searching DSATM Author Directory...</span>';
 
+    const institution =
+      $('institutionKeyword')?.value?.trim() ||
+      'Dayananda Sagar Academy of Technology and Management';
 
-    /* =====================================================
-       FIND FACULTY MATCHES
-    ===================================================== */
-
-    const matches =
-
-      facultyMeta
-
-        .filter(
-          item => {
-
-            const facultyName =
-              String(
-                item.faculty || ''
-              )
-                .trim()
-                .toLowerCase();
-
-
-            return facultyName.includes(
-              query
-            );
-          }
-        )
-
-        .slice(
-          0,
-          20
-        );
-
-
-    /* -------------------------------------------------------
-       NO MATCH
-    ------------------------------------------------------- */
-
-    if (!matches.length) {
-
-      if (liveEl('liveAuthorMatches')) {
-
-        liveEl('liveAuthorMatches')
-          .innerHTML = '';
-
-        liveEl('liveAuthorMatches')
-          .classList
-          .add('hidden');
-      }
-
-
-      if (liveEl('liveStatus')) {
-
-        liveEl('liveStatus').innerHTML =
-
-          '<i></i>' +
-
-          '<span>' +
-
-          'Faculty not found in the DSATM directory. ' +
-
-          'Try another spelling or use Scopus Author ID.' +
-
-          '</span>';
-      }
-
-
-      toast(
-        'Faculty not found in DSATM directory.'
-      );
-
-
-      return;
-    }
-
-
-    /* =====================================================
-       IF ONLY ONE EXACT MATCH
-    ===================================================== */
-
-    const exactMatches =
-
-      matches.filter(
-        item =>
-
-          String(
-            item.faculty || ''
-          )
-            .trim()
-            .toLowerCase()
-
-          ===
-
-          query
-      );
-
-
-    if (exactMatches.length === 1) {
-
-      const exact =
-        exactMatches[0];
-
-
-      const authorId =
-
-        String(
-          exact.scopus_author_id || ''
-        )
-          .replace(/\D/g, '');
-
-
-      /* ---------------------------------------------------
-         VALID SCOPUS ID FOUND
-      --------------------------------------------------- */
-
-      if (authorId) {
-
-        if (liveEl('liveAuthorId')) {
-
-          liveEl('liveAuthorId').value =
-            authorId;
-        }
-
-
-        if (liveEl('liveStatus')) {
-
-          liveEl('liveStatus').innerHTML =
-
-            `<i></i>
-
-             <span>
-
-               Faculty matched:
-
-               <strong>
-                 ${esc(exact.faculty)}
-               </strong>
-
-               <br>
-
-               Loading live Scopus profile…
-
-             </span>`;
-        }
-
-
-        resetLiveSearchButton();
-
-
-        return loadLiveScopusAuthor(
-          authorId
-        );
-      }
-    }
-
-
-    /* =====================================================
-       SHOW MULTIPLE MATCHES
-    ===================================================== */
-
-    if (!liveEl('liveAuthorMatches')) {
-
-      throw new Error(
-        'Faculty match panel is missing.'
-      );
-    }
-
-
-    liveEl('liveAuthorMatches')
-      .innerHTML =
-
-      matches
-
-        .map(
-          item => {
-
-            const faculty =
-              String(
-                item.faculty || ''
-              ).trim();
-
-
-            const department =
-              String(
-                item.department ||
-                'Department not detected'
-              ).trim();
-
-
-            const rawScopusId =
-              String(
-                item.scopus_author_id || ''
-              ).trim();
-
-
-            const authorId =
-              rawScopusId
-                .replace(
-                  /\D/g,
-                  ''
-                );
-
-
-            const hasValidId =
-              /^\d+$/.test(
-                authorId
-              );
-
-
-            const idText =
-              hasValidId
-                ? authorId
-                : 'Not available';
-
-
-            const disabled =
-              hasValidId
-                ? ''
-                : 'disabled';
-
-
-            return `
-
-              <button
-
-                type="button"
-
-                class="live-author-card"
-
-                data-author-id="${esc(authorId)}"
-
-                ${disabled}
-
-              >
-
-                <span
-                  class="live-author-card-main"
-                >
-
-                  <strong>
-
-                    ${esc(faculty)}
-
-                    <span
-                      class="excel-match-badge"
-                    >
-                      DSATM Faculty
-                    </span>
-
-                  </strong>
-
-
-                  <small>
-
-                    ${esc(department)}
-
-                  </small>
-
-                </span>
-
-
-                <span
-                  class="author-id"
-                >
-
-                  Scopus ID:
-                  ${esc(idText)}
-
-                </span>
-
-              </button>
-
-            `;
-
-          }
-        )
-
-        .join('');
-
-
-    /* -------------------------------------------------------
-       SHOW RESULTS
-    ------------------------------------------------------- */
-
-    liveEl('liveAuthorMatches')
-      .classList
-      .remove('hidden');
-
-
-    /* =====================================================
-       CLICK FACULTY
-    ===================================================== */
-
-    liveEl('liveAuthorMatches')
-
-      .querySelectorAll(
-        '.live-author-card'
-      )
-
-      .forEach(
-        btn => {
-
-          btn.addEventListener(
-
-            'click',
-
-            () => {
-
-              const authorId =
-                String(
-                  btn.dataset.authorId ||
-                  ''
-                )
-                  .replace(
-                    /\D/g,
-                    ''
-                  );
-
-
-              if (!authorId) {
-
-                toast(
-                  'No Scopus Author ID is available for this faculty.'
-                );
-
-                return;
-              }
-
-
-              /* -------------------------------------------
-                 PUT ID INTO SCOPUS ID FIELD
-              ------------------------------------------- */
-
-              if (liveEl('liveAuthorId')) {
-
-                liveEl('liveAuthorId')
-                  .value =
-                  authorId;
-              }
-
-
-              /* -------------------------------------------
-                 HIDE SEARCH RESULTS
-              ------------------------------------------- */
-
-              liveEl('liveAuthorMatches')
-                .classList
-                .add('hidden');
-
-
-              /* -------------------------------------------
-                 LOAD LIVE DATA
-              ------------------------------------------- */
-
-              loadLiveScopusAuthor(
-                authorId
-              );
-            }
-          );
-        }
-      );
-
-
-    /* =====================================================
-       STATUS
-    ===================================================== */
-
-    if (liveEl('liveStatus')) {
-
-      liveEl('liveStatus').innerHTML =
-
-        `<i></i>
-
-         <span>
-
-           ${matches.length}
-
-           DSATM faculty match${matches.length === 1
-          ? ''
-          : 'es'
-        } found.
-
-           Select the correct faculty.
-
-         </span>`;
-    }
-
-  }
-
-  catch (e) {
-
-    console.error(
-      'Faculty Directory Search Error:',
-      e
+    const r = await fetch(
+      `/api/scopus/author-search?name=${encodeURIComponent(name)}&institution=${encodeURIComponent(institution)}`
     );
-
-
-    if (liveEl('liveStatus')) {
-
-      liveEl('liveStatus').innerHTML =
-
-        `<i></i>
-
-         <span>
-
-           ${esc(e.message)}
-
-         </span>`;
-    }
-
-
-    toast(
-      e.message
-    );
-
-  }
-
-  finally {
-
-    resetLiveSearchButton();
-  }
-}
-
-
-async function loadLiveScopusAuthor(authorId) {
-
-  /* -------------------------------------------------------
-     CLEAN AUTHOR ID
-  ------------------------------------------------------- */
-
-  authorId =
-    String(authorId || '')
-      .trim()
-      .replace(/\D/g, '');
-
-
-  /* -------------------------------------------------------
-     VALIDATE AUTHOR ID
-  ------------------------------------------------------- */
-
-  if (!authorId) {
-
-    toast(
-      'Scopus Author ID is missing.'
-    );
-
-    return;
-  }
-
-
-  /* -------------------------------------------------------
-     SHOW LOADING
-  ------------------------------------------------------- */
-
-  setLiveSearchButtonLoading(
-    'Fetching live Scopus data…'
-  );
-
-
-  if (liveEl('liveStatus')) {
-
-    liveEl('liveStatus')
-      .classList
-      .remove('loaded');
-
-
-    liveEl('liveStatus').innerHTML =
-
-      '<i></i>' +
-
-      '<span>' +
-
-      'Connecting to Elsevier Scopus…' +
-
-      '</span>';
-  }
-
-
-  try {
-
-    /* =====================================================
-       CALL EXISTING FASTAPI AUTHOR ENDPOINT
-    ===================================================== */
-
-    const r =
-      await fetch(
-
-        `/api/scopus/author/${encodeURIComponent(
-          authorId
-        )
-
-        }`
-      );
-
 
     let d = {};
 
-
     try {
-
-      d =
-        await r.json();
-
+      d = await r.json();
+    } catch (_) {
+      throw new Error('The server returned an invalid response.');
     }
 
-    catch (_) {
-
-      d = {};
-    }
-
-
-    /* -------------------------------------------------------
-       CHECK API RESPONSE
-    ------------------------------------------------------- */
-
-    if (
-      !r.ok ||
-      d.success === false
-    ) {
-
+    if (!r.ok || d.success === false) {
       throw new Error(
-
         d.detail ||
-
         d.error ||
-
-        'Unable to retrieve Scopus profile.'
+        'Unable to search DSATM Author Directory.'
       );
     }
 
+    const candidates = d.candidates || [];
 
-    /* =====================================================
-       SAVE SELECTED AUTHOR
-    ===================================================== */
-
-    selectedLiveAuthorId =
-      authorId;
-
-
-    /* =====================================================
-       GET REAL FACULTY NAME
-    ===================================================== */
-
-    selectedFaculty =
-
-      d.faculty_name ||
-
-      d.faculty ||
-
-      d.indexed_name ||
-
-      `Scopus Author ${authorId}`;
-
-
-    /* =====================================================
-       NORMALIZE LIVE RESPONSE
-    ===================================================== */
-
-    d.faculty =
-      selectedFaculty;
-
-
-    d.faculty_name =
-
-      d.faculty_name ||
-
-      selectedFaculty;
-
-
-    d.scopus_author_id =
-
-      d.scopus_author_id ||
-
-      d.author_id ||
-
-      authorId;
-
-
-    d.department =
-
-      d.department ||
-
-      d.affiliation ||
-
-      'Affiliation not available';
-
-
-    /* =====================================================
-       USE REAL SCOPUS H-INDEX
-    ===================================================== */
-
-    if (
-
-      d.kpis &&
-
-      d.scopus_h_index !== undefined &&
-
-      d.scopus_h_index !== null &&
-
-      d.scopus_h_index !== ''
-
-    ) {
-
-      d.kpis.h_index =
-        d.scopus_h_index;
+    if (!candidates.length) {
+      $('liveStatus').innerHTML =
+        '<i></i><span>No matching DSATM author found. Try another spelling or use Scopus Author ID.</span>';
+      return;
     }
 
+    $('liveAuthorMatches').innerHTML = candidates.map(c => `
+      <button type="button"
+              class="live-author-card"
+              data-author-id="${esc(c.author_id)}">
+        <span>
+          <strong>
+            ${esc(c.name)}
+            ${c.excel_match ? '<span class="excel-match-badge">DSATM directory</span>' : ''}
+          </strong>
+          <small>
+            ${esc(c.affiliation || 'Dayananda Sagar Academy of Technology and Management')}
+            ${c.city ? ' · ' + esc(c.city) : ''}
+            ${c.country ? ' · ' + esc(c.country) : ''}
+          </small>
+        </span>
+        <span class="author-id">ID ${esc(c.author_id)}</span>
+      </button>
+    `).join('');
 
-    /* =====================================================
-       SAVE DASHBOARD
-    ===================================================== */
+    $('liveAuthorMatches').classList.remove('hidden');
 
-    lastDashboard =
-      d;
+    $('liveAuthorMatches')
+      .querySelectorAll('.live-author-card')
+      .forEach(btn => {
+        btn.addEventListener(
+          'click',
+          () => loadLiveScopusAuthor(btn.dataset.authorId)
+        );
+      });
 
+    $('liveStatus').innerHTML =
+      `<i></i><span>${candidates.length} matching DSATM author${candidates.length === 1 ? '' : 's'} found. Select the correct profile.</span>`;
 
-    /* =====================================================
-       LIVE STATUS
-    ===================================================== */
-
-    if (liveEl('liveStatus')) {
-
-      liveEl('liveStatus')
-        .classList
-        .add('loaded');
-
-
-      /* ---------------------------------------------------
-         TOTAL PUBLICATIONS
-      --------------------------------------------------- */
-
-      const total =
-
-        d.total_publications_scopus ??
-
-        d.total_publications ??
-
-        d.kpis?.publications ??
-
-        0;
-
-
-      /* ---------------------------------------------------
-         RETURNED PUBLICATIONS
-      --------------------------------------------------- */
-
-      const returned =
-
-        d.returned_publications ??
-
-        d.publications?.length ??
-
-        0;
-
-
-      /* ---------------------------------------------------
-         STATUS NOTE
-      --------------------------------------------------- */
-
-      const note =
-
-        d.truncated
-
-          ?
-
-          `Showing ${returned} of ${total} publications`
-
-          :
-
-          `${total} publications retrieved`;
-
-
-      /* ---------------------------------------------------
-         DISPLAY STATUS
-      --------------------------------------------------- */
-
-      liveEl('liveStatus').innerHTML =
-
-        `<i></i>
-
-         <span>
-
-            <strong>
-              Live Scopus connected
-            </strong>
-
-            <br>
-
-            ${esc(note)}
-
-         </span>`;
-    }
-
-
-    /* =====================================================
-       RENDER EXISTING DASHBOARD
-    ===================================================== */
-
-    renderDashboard(
-      d,
-      'live'
-    );
-
-
-    /* =====================================================
-       SUCCESS MESSAGE
-    ===================================================== */
-
-    toast(
-      'Live Scopus profile loaded successfully.'
-    );
-
-  }
-
-  catch (e) {
-
-    /* =====================================================
-       ERROR
-    ===================================================== */
-
-    console.error(
-      'Live Scopus Profile Error:',
-      e
-    );
-
-
-    if (liveEl('liveStatus')) {
-
-      liveEl('liveStatus').innerHTML =
-
-        `<i></i>
-
-         <span>
-
-           ${esc(e.message)}
-
-         </span>`;
-    }
-
-
-    toast(
-      e.message
-    );
-
-  }
-
-  finally {
-
-    /* =====================================================
-       RESET BUTTON
-    ===================================================== */
-
-    resetLiveSearchButton();
+  } catch (e) {
+    $('liveStatus').innerHTML =
+      `<i></i><span>${esc(e.message)}</span>`;
+    toast(e.message);
+  } finally {
+    $('liveSearchBtn').disabled = false;
+    $('liveSearchBtn').innerHTML =
+      '<span>Search Live Scopus</span><b>→</b>';
   }
 }
 
-
-/* ==========================================================
-   DEFAULT LIVE SEARCH MODE
-========================================================== */
-
-if (liveEl('liveAuthorName')) {
-
-  setLiveSearchMode(
-    'name'
-  );
-
+async function loadLiveScopusAuthor(authorId) {
+  $('liveSearchBtn').disabled = true;
+  $('liveSearchBtn').innerHTML = '<span>Fetching live Scopus data…</span><b>•••</b>';
+  $('liveStatus').classList.remove('loaded');
+  $('liveStatus').innerHTML = '<i></i><span>Connecting to Elsevier Scopus…</span>';
+  try {
+    const r = await fetch(`/api/scopus/author/${encodeURIComponent(authorId)}`);
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.detail || d.error || 'Unable to retrieve Scopus profile.');
+    selectedLiveAuthorId = authorId;
+    selectedFaculty = d.faculty_name || d.faculty || d.indexed_name || `Scopus Author ${authorId}`;
+    d.faculty = selectedFaculty;
+    d.scopus_author_id = d.scopus_author_id || d.author_id || authorId;
+    d.department = d.department || d.affiliation || 'Affiliation not available';
+    if (d.kpis && d.scopus_h_index !== undefined && d.scopus_h_index !== null && d.scopus_h_index !== '') d.kpis.h_index = d.scopus_h_index;
+    lastDashboard = d;
+    $('liveStatus').classList.add('loaded');
+    const total = d.total_publications_scopus ?? d.total_publications ?? d.kpis?.publications ?? 0;
+    const returned = d.returned_publications ?? d.publications?.length ?? 0;
+    const note = d.truncated ? `Showing ${returned} of ${total} publications` : `${total} publications retrieved`;
+    $('liveStatus').innerHTML = `<i></i><span><strong>Live Scopus connected</strong><br>${note}</span>`;
+    $('liveAuthorMatches').classList.add('hidden');
+    renderDashboard(d, 'live');
+    toast('Live Scopus profile loaded successfully.');
+  } catch (e) {
+    $('liveStatus').innerHTML = `<i></i><span>${esc(e.message)}</span>`;
+    toast(e.message);
+  } finally {
+    $('liveSearchBtn').disabled = false;
+    $('liveSearchBtn').innerHTML = '<span>Search Live Scopus</span><b>→</b>';
+  }
 }
 
-else {
-
-  /*
-     Backward compatibility:
-     if index.html has not yet been updated
-     with the Faculty Name controls,
-     continue using Scopus Author ID.
-  */
-
-  liveSearchMode =
-    'id';
-}
-
-
-/* ==========================================================
-   END LIVE SCOPUS SEARCH
-========================================================== */
-
-
+setLiveSearchMode('name');
 
 
 /* ==========================================================
@@ -1590,13 +643,9 @@ $('uploadBtn').addEventListener(
 
       $('facultySearch').disabled =
         false;
-      facultyMeta =
-        d.faculty_meta || [];
 
       if ($('refreshScopusExcelBtn')) {
-        $('refreshScopusExcelBtn').disabled =
-          !Array.isArray(facultyMeta) ||
-          facultyMeta.length === 0;
+        $('refreshScopusExcelBtn').disabled = false;
       }
 
       $('departmentFilter').disabled =
@@ -1683,350 +732,55 @@ $('uploadBtn').addEventListener(
    REFRESH UPLOADED EXCEL WITH LIVE SCOPUS DATA
 ========================================================== */
 
-/* ==========================================================
-   REFRESH EXCEL WITH LIVE SCOPUS DATA
-   Works with auto-loaded or manually uploaded Excel
-========================================================== */
-
 if ($('refreshScopusExcelBtn')) {
+  $('refreshScopusExcelBtn').addEventListener('click', async () => {
+    const btn = $('refreshScopusExcelBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span>Refreshing faculty from Scopus…</span><b>•••</b>';
 
-  $('refreshScopusExcelBtn')
-    .addEventListener(
-      'click',
-      async () => {
+    $('uploadStatus').innerHTML =
+      '<i></i><span>Retrieving current publications, citations and h-index values from Scopus…</span>';
 
-        const btn =
-          $('refreshScopusExcelBtn');
+    try {
+      const r = await fetch('/api/scopus/refresh-excel?max_records_per_author=500');
 
-
-        /* --------------------------------------------------
-           CHECK FACULTY DIRECTORY
-        -------------------------------------------------- */
-
-        if (
-          !Array.isArray(facultyMeta) ||
-          facultyMeta.length === 0
-        ) {
-
-          toast(
-            'Faculty directory is not loaded.'
-          );
-
-          if ($('uploadStatus')) {
-
-            $('uploadStatus')
-              .classList
-              .remove('loaded');
-
-
-            $('uploadStatus').innerHTML =
-
-              '<i></i>' +
-
-              '<span>' +
-
-              'No faculty directory is available. ' +
-
-              'Please restart the application or upload the Excel file.' +
-
-              '</span>';
-          }
-
-          return;
-        }
-
-
-        /* --------------------------------------------------
-           START REFRESH
-        -------------------------------------------------- */
-
-        btn.disabled =
-          true;
-
-
-        btn.innerHTML =
-
-          '<span>' +
-
-          'Refreshing faculty from Scopus…' +
-
-          '</span>' +
-
-          '<b>•••</b>';
-
-
-        if ($('uploadStatus')) {
-
-          $('uploadStatus')
-            .classList
-            .remove('loaded');
-
-
-          $('uploadStatus').innerHTML =
-
-            '<i></i>' +
-
-            '<span>' +
-
-            `Retrieving live Scopus data for ${facultyMeta.length} faculty…`
-
-            +
-
-            '</span>';
-        }
-
-
+      if (!r.ok) {
+        let message = 'Unable to refresh Excel from Scopus.';
         try {
-
-          /* --------------------------------------------------
-             CALL BACKEND REFRESH API
-          -------------------------------------------------- */
-
-          const r =
-            await fetch(
-
-              '/api/scopus/refresh-excel' +
-
-              '?max_records_per_author=500'
-            );
-
-
-          /* --------------------------------------------------
-             HANDLE ERROR RESPONSE
-          -------------------------------------------------- */
-
-          if (!r.ok) {
-
-            let message =
-              'Unable to refresh Excel from Scopus.';
-
-
-            try {
-
-              const d =
-                await r.json();
-
-
-              message =
-
-                d.detail ||
-
-                d.error ||
-
-                d.message ||
-
-                message;
-
-            }
-
-            catch (_) { }
-
-
-            throw new Error(
-              message
-            );
-          }
-
-
-          /* --------------------------------------------------
-             DOWNLOAD GENERATED EXCEL
-          -------------------------------------------------- */
-
-          const blob =
-            await r.blob();
-
-
-          const disposition =
-
-            r.headers.get(
-              'Content-Disposition'
-            )
-
-            || '';
-
-
-          const match =
-
-            disposition.match(
-              /filename="?([^";]+)"?/i
-            );
-
-
-          const filename =
-
-            match
-
-              ? match[1]
-
-              : 'DSATM_Scopus_Live_Updated.xlsx';
-
-
-          /* --------------------------------------------------
-             REFRESH SUMMARY
-          -------------------------------------------------- */
-
-          const updated =
-
-            r.headers.get(
-              'X-Scopus-Updated-Faculty'
-            )
-
-            || '0';
-
-
-          const issues =
-
-            r.headers.get(
-              'X-Scopus-Refresh-Issues'
-            )
-
-            || '0';
-
-
-          /* --------------------------------------------------
-             DOWNLOAD FILE
-          -------------------------------------------------- */
-
-          const url =
-            URL.createObjectURL(
-              blob
-            );
-
-
-          const a =
-            document.createElement(
-              'a'
-            );
-
-
-          a.href =
-            url;
-
-
-          a.download =
-            filename;
-
-
-          document.body
-            .appendChild(
-              a
-            );
-
-
-          a.click();
-
-
-          a.remove();
-
-
-          URL.revokeObjectURL(
-            url
-          );
-
-
-          /* --------------------------------------------------
-             SUCCESS STATUS
-          -------------------------------------------------- */
-
-          if ($('uploadStatus')) {
-
-            $('uploadStatus')
-              .classList
-              .add('loaded');
-
-
-            $('uploadStatus').innerHTML =
-
-              `<i></i>
-
-               <span>
-
-                 <strong>
-                   Live Scopus refresh completed
-                 </strong>
-
-                 <br>
-
-                 ${esc(updated)} faculty updated
-
-                 ·
-
-                 ${esc(issues)} issue(s)
-
-                 <br>
-
-                 Updated Excel downloaded successfully.
-
-               </span>`;
-          }
-
-
-          toast(
-            'Live Scopus workbook created successfully.'
-          );
-
-
-        }
-
-        catch (e) {
-
-          /* --------------------------------------------------
-             ERROR
-          -------------------------------------------------- */
-
-          console.error(
-            'Refresh Excel Error:',
-            e
-          );
-
-
-          if ($('uploadStatus')) {
-
-            $('uploadStatus')
-              .classList
-              .remove('loaded');
-
-
-            $('uploadStatus').innerHTML =
-
-              `<i></i>
-
-               <span>
-
-                 ${esc(e.message)}
-
-               </span>`;
-          }
-
-
-          toast(
-            e.message
-          );
-
-        }
-
-        finally {
-
-          /* --------------------------------------------------
-             RESET BUTTON
-          -------------------------------------------------- */
-
-          btn.disabled =
-            false;
-
-
-          btn.innerHTML =
-
-            '<span>' +
-
-            'Refresh Excel from Live Scopus' +
-
-            '</span>' +
-
-            '<b>↻</b>';
-        }
+          const d = await r.json();
+          message = d.detail || d.error || message;
+        } catch (_) {}
+        throw new Error(message);
       }
-    );
+
+      const d = await r.json();
+
+      const updated = d.updated_faculty ?? 0;
+      const publications = d.live_publications ?? 0;
+      const issues = d.issues ?? 0;
+      const gh = d.github || {};
+      const commitShort = gh.commit_sha ? gh.commit_sha.slice(0, 7) : '';
+
+      $('uploadStatus').classList.add('loaded');
+      $('uploadStatus').innerHTML =
+        `<i></i><span><strong>Live Scopus master updated</strong><br>` +
+        `${esc(updated)} faculty updated · ${esc(publications)} live publication record(s) · ` +
+        `${esc(issues)} issue(s).<br>` +
+        `GitHub: ${esc(gh.repository || '')} / ${esc(gh.path || '')}` +
+        `${commitShort ? ' · commit ' + esc(commitShort) : ''}` +
+        `<br>Vercel redeployment will start automatically when GitHub deployment is connected.</span>`;
+
+      toast('Master Excel updated in GitHub successfully.');
+
+    } catch (e) {
+      $('uploadStatus').classList.remove('loaded');
+      $('uploadStatus').innerHTML = `<i></i><span>${esc(e.message)}</span>`;
+      toast(e.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<span>Refresh Excel from Live Scopus</span><b>↻</b>';
+    }
+  });
 }
 
 
@@ -3333,47 +2087,25 @@ function renderPublications() {
 
                     <td>
 
-    <div class="publication-links">
+                        ${r.link
 
-        ${(r.doi_url || r.doi)
+          ?
 
-          ? `<a
-                  class="doi-link"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  href="${esc(
-            r.doi_url ||
-            `https://doi.org/${r.doi}`
-          )}"
-               >
-                  DOI ↗
-               </a>`
+          `<a
+                                class="doi-link"
+                                target="_blank"
+                                rel="noopener"
+                                href="${esc(r.link)}"
+                             >
+                                Open ↗
+                             </a>`
 
-          : ''
+          :
+
+          esc(r.doi || '—')
         }
 
-        ${r.scopus_url
-
-          ? `<a
-                  class="doi-link scopus-link"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  href="${esc(r.scopus_url)}"
-               >
-                  Scopus ↗
-               </a>`
-
-          : ''
-        }
-
-        ${!(r.doi_url || r.doi || r.scopus_url)
-          ? '—'
-          : ''
-        }
-
-    </div>
-
-</td>
+                    </td>
 
                 </tr>`
     )
@@ -4085,538 +2817,5 @@ if ($('changeDatasetBtn')) {
 /* ==========================================================
    INITIAL MODE
 ========================================================== */
-/* ==========================================================
-   AUTO LOAD FACULTY DIRECTORY FROM BACKEND
-========================================================== */
-
-async function loadDefaultFacultyDirectory() {
-
-  try {
-
-    const r =
-      await fetch('/api/bootstrap');
-
-    const d =
-      await r.json();
-
-    if (
-      !r.ok ||
-      !d.loaded
-    ) {
-
-      console.log(
-        'No default faculty directory loaded.'
-      );
-
-      return;
-    }
-
-    facultyMeta =
-      d.faculty_meta || [];
-
-    if ($('refreshScopusExcelBtn')) {
-      $('refreshScopusExcelBtn').disabled =
-        facultyMeta.length === 0;
-    }
-    $('facultySearch').disabled =
-      false;
-
-    $('departmentFilter').disabled =
-      false;
-
-    if ($('searchBy')) {
-      $('searchBy').disabled =
-        false;
-    }
-
-    $('summaryBtn').disabled =
-      false;
-
-    if ($('sideSummaryBtn')) {
-      $('sideSummaryBtn').disabled =
-        false;
-    }
-
-    if ($('homeSummaryBtn')) {
-      $('homeSummaryBtn').disabled =
-        false;
-    }
-
-    if ($('openDashboardBtn')) {
-      $('openDashboardBtn').disabled =
-        false;
-    }
-
-    $('facultyMeta').textContent =
-      `${facultyMeta.length} faculty shown`;
-
-    fillDepartments(
-      d.departments || []
-    );
-
-    applyFacultyFilters();
-
-    console.log(
-      `Default faculty directory loaded: ${facultyMeta.length} faculty`
-    );
-
-  }
-
-  catch (e) {
-
-    console.error(
-      'Unable to load default faculty directory:',
-      e
-    );
-  }
-}
-/* ==========================================================
-   FULL INSTITUTION SCOPUS SYNC
-========================================================== */
-
-if ($('refreshScopusExcelBtn')) {
-
-  $('refreshScopusExcelBtn')
-    .addEventListener(
-      'click',
-      async () => {
-
-        const btn =
-          $('refreshScopusExcelBtn');
-
-        let progressTimer =
-          null;
-
-
-        if (!facultyMeta.length) {
-
-          toast(
-            'Institution faculty directory is not loaded.'
-          );
-
-          return;
-        }
-
-
-        btn.disabled = true;
-
-
-        btn.innerHTML =
-          '<span>Starting institution sync…</span><b>•••</b>';
-
-
-        /* ==================================================
-           POLL PROGRESS
-        ================================================== */
-
-        const updateProgress =
-          async () => {
-
-            try {
-
-              const r =
-                await fetch(
-                  '/api/scopus/sync-progress',
-                  {
-                    cache: 'no-store'
-                  }
-                );
-
-
-              if (!r.ok) {
-                return;
-              }
-
-
-              const p =
-                await r.json();
-
-
-              const percent =
-                Number(
-                  p.percent || 0
-                );
-
-
-              btn.innerHTML =
-
-                `<span>
-
-                  Syncing Scopus ${percent}%
-
-                </span>
-
-                <b>↻</b>`;
-
-
-              if ($('uploadStatus')) {
-
-                $('uploadStatus').innerHTML =
-
-                  `<div style="width:100%">
-
-                    <div
-                      style="
-                        display:flex;
-                        justify-content:space-between;
-                        gap:10px;
-                        margin-bottom:7px;
-                      "
-                    >
-
-                      <strong>
-                        Institution Scopus Sync
-                      </strong>
-
-                      <strong>
-                        ${percent}%
-                      </strong>
-
-                    </div>
-
-
-                    <div
-                      style="
-                        width:100%;
-                        height:7px;
-                        border-radius:20px;
-                        background:#1c2b41;
-                        overflow:hidden;
-                        margin-bottom:8px;
-                      "
-                    >
-
-                      <div
-                        style="
-                          height:100%;
-                          width:${percent}%;
-                          border-radius:20px;
-                          background:#2f86ed;
-                          transition:width .35s ease;
-                        "
-                      ></div>
-
-                    </div>
-
-
-                    <span>
-
-                      ${esc(
-                    p.message ||
-                    'Synchronizing Scopus…'
-                  )}
-
-                    </span>
-
-
-                    <br>
-
-
-                    <small>
-
-                      New publications:
-                      ${Number(
-                    p.new_publications || 0
-                  )}
-
-                      &nbsp; · &nbsp;
-
-                      Updated:
-                      ${Number(
-                    p.updated_publications || 0
-                  )}
-
-                      &nbsp; · &nbsp;
-
-                      New authors:
-                      ${Number(
-                    p.new_authors || 0
-                  )}
-
-                      &nbsp; · &nbsp;
-
-                      Issues:
-                      ${Number(
-                    p.issues || 0
-                  )}
-
-                    </small>
-
-                  </div>`;
-              }
-
-            }
-
-            catch (_) {
-
-              // Ignore temporary polling errors.
-            }
-          };
-
-
-        progressTimer =
-          setInterval(
-            updateProgress,
-            1000
-          );
-
-
-        updateProgress();
-
-
-        try {
-
-          /* ==================================================
-             RUN INSTITUTION SYNC
-          ================================================== */
-
-          const r =
-            await fetch(
-              '/api/scopus/refresh-excel',
-              {
-                cache: 'no-store'
-              }
-            );
-
-
-          if (!r.ok) {
-
-            let message =
-              'Unable to synchronize institution with Scopus.';
-
-
-            try {
-
-              const d =
-                await r.json();
-
-
-              message =
-                d.detail ||
-                d.error ||
-                d.message ||
-                message;
-
-            }
-
-            catch (_) { }
-
-
-            throw new Error(
-              message
-            );
-          }
-
-
-          /* ==================================================
-             RESPONSE COUNTS
-          ================================================== */
-
-          const oldCount =
-            r.headers.get(
-              'X-Scopus-Existing'
-            ) || '0';
-
-
-          const total =
-            r.headers.get(
-              'X-Scopus-Total'
-            ) || '0';
-
-
-          const newPublications =
-            r.headers.get(
-              'X-Scopus-New-Publications'
-            ) || '0';
-
-
-          const newAuthors =
-            r.headers.get(
-              'X-Scopus-New-Authors'
-            ) || '0';
-
-
-          const updated =
-            r.headers.get(
-              'X-Scopus-Updated'
-            ) || '0';
-
-
-          const issues =
-            r.headers.get(
-              'X-Scopus-Issues'
-            ) || '0';
-
-
-          /* ==================================================
-             DOWNLOAD MASTER EXCEL
-          ================================================== */
-
-          const blob =
-            await r.blob();
-
-
-          const url =
-            URL.createObjectURL(
-              blob
-            );
-
-
-          const a =
-            document.createElement(
-              'a'
-            );
-
-
-          a.href =
-            url;
-
-
-          a.download =
-            'DSATM_Scopus_Master_Updated.xlsx';
-
-
-          document.body
-            .appendChild(
-              a
-            );
-
-
-          a.click();
-
-
-          a.remove();
-
-
-          URL.revokeObjectURL(
-            url
-          );
-
-
-          /* ==================================================
-             RELOAD FACULTY DIRECTORY FROM BACKEND
-          ================================================== */
-
-          await loadDefaultFacultyDirectory();
-
-
-          if ($('uploadStatus')) {
-
-            $('uploadStatus')
-              .classList
-              .add('loaded');
-
-
-            $('uploadStatus').innerHTML =
-
-              `<div style="width:100%">
-
-                <strong>
-                  ✓ Institution Scopus Sync Complete
-                </strong>
-
-                <br><br>
-
-                Existing Excel:
-                ${esc(oldCount)}
-
-                <br>
-
-                Current Scopus:
-                ${esc(total)}
-
-                <br>
-
-                <strong>
-                  New publications added:
-                  +${esc(newPublications)}
-                </strong>
-
-                <br>
-
-                Existing publications updated:
-                ${esc(updated)}
-
-                <br>
-
-                <strong>
-                  New DSATM authors detected:
-                  +${esc(newAuthors)}
-                </strong>
-
-                <br>
-
-                Issues:
-                ${esc(issues)}
-
-                <br><br>
-
-                Master Excel saved and downloaded.
-
-              </div>`;
-          }
-
-
-          toast(
-            `Scopus sync complete: +${newPublications} publications`
-          );
-
-
-        }
-
-        catch (e) {
-
-          console.error(
-            'Institution Scopus Sync Error:',
-            e
-          );
-
-
-          if ($('uploadStatus')) {
-
-            $('uploadStatus')
-              .classList
-              .remove('loaded');
-
-
-            $('uploadStatus').innerHTML =
-
-              `<i></i>
-
-               <span>
-
-                 ${esc(e.message)}
-
-               </span>`;
-          }
-
-
-          toast(
-            e.message
-          );
-
-        }
-
-        finally {
-
-          if (progressTimer) {
-
-            clearInterval(
-              progressTimer
-            );
-          }
-
-
-          btn.disabled =
-            false;
-
-
-          btn.innerHTML =
-            '<span>Refresh Excel from Live Scopus</span><b>↻</b>';
-        }
-      }
-    );
-}
-loadDefaultFacultyDirectory();
 
 setMode('live');

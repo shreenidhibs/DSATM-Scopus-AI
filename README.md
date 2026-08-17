@@ -445,3 +445,125 @@ permissions, subscriptions, institutional access, and usage limits.
 
 This dashboard is an institutional analytics application and is not an
 official Elsevier or Scopus product.
+
+
+## Automatic DSATM Author Directory
+
+Live Faculty Name search now automatically checks for `DSATM_Author_Directory.xlsx`.
+
+On the first Faculty Name search, if the directory does not exist, the GUI starts a background build from DSATM Scopus Affiliation ID `60283483` and displays live progress:
+
+- publications loaded/processed,
+- percentage complete,
+- authors discovered,
+- current build stage.
+
+After completion, the Excel is stored in the project root with exactly:
+
+- `Author Name`
+- `Scopus Author ID`
+
+Later Faculty Name searches use this local directory immediately and then load live Scopus analytics using the resolved Author ID.
+
+Useful endpoints:
+
+```text
+GET  /api/scopus/author-directory-status
+POST /api/scopus/start-author-directory-build
+GET  /api/scopus/author-directory-progress
+GET  /api/scopus/download-author-directory
+GET  /api/scopus/author-search?name=<faculty name>
+```
+
+
+## Permanent DSATM Author Directory
+
+This package includes `DSATM_Author_Directory.xlsx` in the project root.
+
+The directory was created from the DSATM Scopus export and contains exactly:
+
+- `Author Name`
+- `Scopus Author ID`
+
+The current directory contains 746 unique DSATM-affiliated author IDs.
+
+The Live Scopus name-search workflow is now:
+
+```text
+Faculty Name
+    ↓
+DSATM_Author_Directory.xlsx
+    ↓
+Resolve Scopus Author ID
+    ↓
+Existing live AU-ID(...) Scopus search
+    ↓
+Faculty research dashboard
+```
+
+The application automatically loads `DSATM_Author_Directory.xlsx` when `app.py`
+starts. No author-directory API build is required, and the user does not have
+to upload this Excel through the GUI.
+
+For example, the directory currently resolves:
+
+```text
+Shreenidhi, B.S.  →  60057735400
+```
+
+If the institutional Scopus export is updated in the future, regenerate
+`DSATM_Author_Directory.xlsx` from that export and replace the file in the
+project root.
+
+
+## GitHub Auto-Update from Vercel
+
+The **Refresh Excel from Live Scopus** button now works without trying to write
+into Vercel's read-only application directory.
+
+New workflow:
+
+```text
+Refresh Excel from Live Scopus
+        ↓
+Fetch current Scopus data
+        ↓
+Create updated XLSX in memory
+        ↓
+GitHub Contents API
+        ↓
+Replace GITHUB_EXCEL_PATH on main
+        ↓
+GitHub commit
+        ↓
+Vercel automatic redeploy (when the repository is connected to Vercel)
+```
+
+Configure these variables in **Vercel → Project → Settings → Environment Variables**:
+
+```text
+GITHUB_TOKEN=<fine-grained GitHub token>
+GITHUB_OWNER=shreenidhibs
+GITHUB_REPO=DSATM-Scopus-AI
+GITHUB_BRANCH=main
+GITHUB_EXCEL_PATH=DSATM Scopus Master.xlsx
+```
+
+The GitHub token must have repository **Contents: Read and write** permission for
+`DSATM-Scopus-AI`. Never commit the token to GitHub.
+
+If the Excel file in your repository has a different name or folder, set
+`GITHUB_EXCEL_PATH` to that exact repository-relative path, for example:
+
+```text
+data/DSATM Scopus Master.xlsx
+```
+
+Diagnostic endpoint:
+
+```text
+/api/github/update-status
+```
+
+It confirms the owner/repository/branch/path and whether a token is configured,
+but never returns the token itself.
