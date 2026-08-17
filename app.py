@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import io
+import base64
 import os
 import re
+import threading
 from datetime import datetime
 from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+
 
 import pandas as pd
 import requests
@@ -25,13 +30,7 @@ faculty_meta_cache = []
 
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(
-    BASE_DIR / ".env",
-    override=True
-)
-print("API KEY FOUND:", bool(os.getenv("ELS_API_KEY")))
-print("API KEY LENGTH:", len(os.getenv("ELS_API_KEY", "")))
-print("INST TOKEN FOUND:", bool(os.getenv("ELS_INST_TOKEN")))
+load_dotenv(BASE_DIR / ".env")
 app = FastAPI(title="DSI Faculty Scopus Research Analytics", version="2.0.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -47,13 +46,8 @@ STATE: dict[str, Any] = {
 }
 
 
-
 LIVE_CACHE: dict[str, dict[str, Any]] = {}
 SCOPUS_SEARCH_URL = "https://api.elsevier.com/content/search/scopus"
-
-# =========================================================
-# DSATM INSTITUTION SCOPUS SYNC
-# =========================================================
 
 DSATM_INSTITUTION_NAME = (
     "Dayananda Sagar Academy of Technology and Management"
@@ -61,24 +55,26 @@ DSATM_INSTITUTION_NAME = (
 
 DSATM_SCOPUS_AFFILIATION_ID = "60283483"
 
-MASTER_EXCEL_FILE = (
-    BASE_DIR / "DSATM Scopus Master.xlsx"
-)
+DSATM_AUTHOR_DIRECTORY_FILE = BASE_DIR / "DSATM_Author_Directory.xlsx"
 
-
-SCOPUS_SYNC_PROGRESS = {
+AUTHOR_DIRECTORY_PROGRESS: dict[str, Any] = {
     "running": False,
     "stage": "idle",
+    "percent": 0,
     "current": 0,
     "total": 0,
-    "percent": 0,
-    "faculty": "",
-    "new_publications": 0,
-    "updated_publications": 0,
-    "new_authors": 0,
-    "issues": 0,
-    "message": ""
+    "authors_found": 0,
+    "message": "Author directory has not been built yet.",
+    "error": "",
+    "completed": False,
 }
+AUTHOR_DIRECTORY_PROGRESS_LOCK = threading.Lock()
+
+
+
+DSATM_AUTHOR_DIRECTORY: dict[str, dict[str, Any]] = {}
+DSATM_AUTHOR_PREFIXES_LOADED: set[str] = set()
+
 
 def scopus_headers() -> dict[str, str]:
     api_key = os.getenv("ELS_API_KEY", "").strip()
@@ -91,8 +87,15 @@ def scopus_headers() -> dict[str, str]:
     return headers
 
 
-def _scopus_request(author_id: str, start: int = 0, count: int = 25) -> dict[str, Any]:
-    # Current Scopus service level allows a maximum of 25 records per request.
+def _scopus_request(
+    author_id: str,
+    start: int = 0,
+    count: int = 25
+) -> dict[str, Any]:
+    author_id = re.sub(r"\D", "", str(author_id or ""))
+    if not author_id:
+        raise HTTPException(400, "Enter a valid numeric Scopus Author ID.")
+
     count = max(1, min(int(count or 25), 25))
 
     response = requests.get(
@@ -107,10 +110,1044 @@ def _scopus_request(author_id: str, start: int = 0, count: int = 25) -> dict[str
         },
         timeout=30,
     )
+
     if not response.ok:
         detail = response.text[:800]
-        raise HTTPException(response.status_code, f"Scopus API error: {detail}")
+        raise HTTPException(
+            response.status_code,
+            f"Scopus API error: {detail}"
+        )
+
     return response.json()
+
+
+def _scopus_institution_request(
+    start: int = 0,
+    count: int = 25,
+    query_extra: str = ""
+) -> dict[str, Any]:
+    """
+    Search DSATM publications using only the normal Scopus Search API.
+    No facets and no Author Search API are used.
+    """
+
+    count = max(1, min(int(count or 25), 25))
+
+    query = f"AF-ID({DSATM_SCOPUS_AFFILIATION_ID})"
+
+    if query_extra:
+        query = f"{query} AND {query_extra}"
+
+    response = requests.get(
+        SCOPUS_SEARCH_URL,
+        headers=scopus_headers(),
+        params={
+            "query": query,
+            "start": start,
+            "count": count,
+            "sort": "-coverDate",
+            "view": "STANDARD",
+        },
+        timeout=30,
+    )
+
+    if not response.ok:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=(
+                "DSATM Scopus institution search failed: "
+                + response.text[:800]
+            ),
+        )
+
+    return response.json()
+
+
+def _entry_author_affiliation_url(entry: dict[str, Any]) -> str:
+    """
+    Return the Scopus author-affiliation URL for a publication,
+    when Scopus exposes one in the search result links.
+    """
+
+    links = entry.get("link") or []
+
+    if isinstance(links, dict):
+        links = [links]
+
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+
+        ref = str(link.get("@ref") or "").strip().lower()
+        href = str(link.get("@href") or "").strip()
+
+        if ref == "author-affiliation" and href:
+            return href
+
+    # Fallback from EID / Scopus document identifier.
+    scopus_id = str(entry.get("dc:identifier") or "").strip()
+
+    if scopus_id.upper().startswith("SCOPUS_ID:"):
+        sid = scopus_id.split(":", 1)[1].strip()
+        if sid:
+            return (
+                "https://api.elsevier.com/content/abstract/scopus_id/"
+                f"{sid}?field=author,affiliation"
+            )
+
+    return ""
+
+
+def _extract_authors_from_abstract_payload(
+    payload: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """
+    Parse authors + Scopus Author IDs from an Abstract/Author-Affiliation response.
+    """
+
+    root = payload.get("abstracts-retrieval-response") or payload
+
+    authors_block = root.get("authors") or {}
+
+    if isinstance(authors_block, dict):
+        raw_authors = authors_block.get("author") or []
+    else:
+        raw_authors = []
+
+    if isinstance(raw_authors, dict):
+        raw_authors = [raw_authors]
+
+    authors: list[dict[str, Any]] = []
+
+    for item in raw_authors:
+        if not isinstance(item, dict):
+            continue
+
+        author_id = str(
+            item.get("@auid")
+            or item.get("authid")
+            or item.get("auid")
+            or ""
+        ).strip()
+
+        indexed = str(
+            item.get("ce:indexed-name")
+            or item.get("indexed-name")
+            or ""
+        ).strip()
+
+        given = str(
+            item.get("ce:given-name")
+            or item.get("given-name")
+            or ""
+        ).strip()
+
+        surname = str(
+            item.get("ce:surname")
+            or item.get("surname")
+            or ""
+        ).strip()
+
+        name = indexed or " ".join(
+            part for part in (given, surname) if part
+        ).strip()
+
+        # Collect affiliations attached directly to the author.
+        afids: list[str] = []
+        affiliation = item.get("affiliation") or []
+
+        if isinstance(affiliation, dict):
+            affiliation = [affiliation]
+
+        for aff in affiliation:
+            if not isinstance(aff, dict):
+                continue
+
+            afid = str(
+                aff.get("@id")
+                or aff.get("afid")
+                or aff.get("id")
+                or ""
+            ).strip()
+
+            if afid:
+                afids.append(afid)
+
+        if author_id and name:
+            authors.append({
+                "name": name,
+                "author_id": re.sub(r"\D", "", author_id),
+                "afids": afids,
+            })
+
+    return authors
+
+
+def _get_publication_authors(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Obtain authors for one Scopus publication.
+
+    First use any author list already present in the normal Scopus Search
+    response. If Author IDs are missing, follow the publication's
+    author-affiliation link and request only author + affiliation fields.
+    """
+
+    result: list[dict[str, Any]] = []
+
+    # 1. Try normal search-result author objects.
+    raw_authors = entry.get("author") or []
+
+    if isinstance(raw_authors, dict):
+        raw_authors = [raw_authors]
+
+    for item in raw_authors:
+        if not isinstance(item, dict):
+            continue
+
+        name = str(
+            item.get("authname")
+            or item.get("ce:indexed-name")
+            or item.get("preferred-name")
+            or ""
+        ).strip()
+
+        author_id = str(
+            item.get("authid")
+            or item.get("@auid")
+            or item.get("auid")
+            or ""
+        ).strip()
+
+        if name and author_id:
+            result.append({
+                "name": name,
+                "author_id": re.sub(r"\D", "", author_id),
+                "afids": [],
+            })
+
+    if result:
+        return result
+
+    # 2. Follow the author-affiliation link for this paper.
+    url = _entry_author_affiliation_url(entry)
+
+    if not url:
+        return []
+
+    response = requests.get(
+        url,
+        headers=scopus_headers(),
+        timeout=30,
+    )
+
+    if not response.ok:
+        return []
+
+    try:
+        payload = response.json()
+    except Exception:
+        return []
+
+    return _extract_authors_from_abstract_payload(payload)
+
+
+def _name_match_score(query: str, candidate: str) -> int:
+    """
+    Match variants such as:
+      Shreenidhi B S
+      Shreenidhi, B.S.
+      B S Shreenidhi
+      Shreenidhi
+    """
+
+    q = norm(query)
+    c = norm(candidate)
+
+    if not q or not c:
+        return 0
+
+    q_compact = re.sub(r"[^a-z0-9]", "", q)
+    c_compact = re.sub(r"[^a-z0-9]", "", c)
+
+    if q_compact == c_compact:
+        return 100
+
+    q_tokens = q.split()
+    c_tokens = c.split()
+
+    q_set = set(q_tokens)
+    c_set = set(c_tokens)
+
+    score = 0
+
+    if q == c:
+        score = 100
+    elif q in c or c in q:
+        score = 92
+
+    overlap = len(q_set & c_set)
+
+    if overlap:
+        token_score = int(
+            100 * overlap / max(len(q_set), len(c_set))
+        )
+        score = max(score, token_score)
+
+        if q_set.issubset(c_set) or c_set.issubset(q_set):
+            score = max(score, 88)
+
+    ratio = int(
+        100
+        * SequenceMatcher(
+            None,
+            q_compact,
+            c_compact
+        ).ratio()
+    )
+
+    score = max(score, ratio)
+
+    return min(score, 100)
+
+
+def _candidate_query_terms(faculty_name: str) -> list[str]:
+    """
+    Build several normal Scopus Search queries from the typed name.
+
+    We search both surname and first-name indexes because Scopus may store
+    a person's indexed name in a different order.
+    """
+
+    tokens = [
+        token
+        for token in norm(faculty_name).split()
+        if token
+    ]
+
+    useful = [
+        token
+        for token in tokens
+        if len(token) >= 2
+    ]
+
+    queries: list[str] = []
+
+    for token in useful:
+        queries.append(f"AUTHLASTNAME({token})")
+        queries.append(f"AUTHFIRST({token})")
+
+    # Also try the longest token first; for many Indian names this is the
+    # most distinctive part of the indexed author name.
+    if useful:
+        longest = max(useful, key=len)
+        preferred = [
+            f"AUTHLASTNAME({longest})",
+            f"AUTHFIRST({longest})",
+        ]
+        queries = preferred + [
+            q for q in queries if q not in preferred
+        ]
+
+    # Remove duplicates while preserving order.
+    seen: set[str] = set()
+    deduped: list[str] = []
+
+    for query in queries:
+        if query in seen:
+            continue
+        seen.add(query)
+        deduped.append(query)
+
+    return deduped[:6]
+
+
+def search_dsatm_author_directory(
+    faculty_name: str,
+    limit: int = 15
+) -> list[dict[str, Any]]:
+    """
+    Resolve a typed faculty/researcher name without Excel and without facets.
+
+    Flow:
+      AF-ID(60283483)
+        + normal Scopus author-name document query
+        -> matching DSATM publications
+        -> publication author-affiliation data
+        -> author name + Scopus Author ID
+        -> fuzzy local match
+    """
+
+    faculty_name = re.sub(
+        r"\s+",
+        " ",
+        str(faculty_name or "")
+    ).strip()
+
+    if len(faculty_name) < 2:
+        return []
+
+    global DSATM_AUTHOR_DIRECTORY
+
+    entries_by_eid: dict[str, dict[str, Any]] = {}
+
+    # Search only DSATM papers likely to contain the typed researcher.
+    for query_extra in _candidate_query_terms(faculty_name):
+        data = _scopus_institution_request(
+            start=0,
+            count=25,
+            query_extra=query_extra,
+        )
+
+        results = data.get("search-results") or {}
+        entries = list(results.get("entry") or [])
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            key = str(
+                entry.get("eid")
+                or entry.get("dc:identifier")
+                or entry.get("prism:url")
+                or ""
+            ).strip()
+
+            if not key:
+                key = str(id(entry))
+
+            entries_by_eid[key] = entry
+
+        # Once we already have enough likely papers, avoid unnecessary
+        # additional Scopus requests.
+        if len(entries_by_eid) >= 40:
+            break
+
+    # If the normal indexed-name filters returned nothing, try a conservative
+    # fallback over the newest DSATM publications.
+    if not entries_by_eid:
+        data = _scopus_institution_request(
+            start=0,
+            count=25
+        )
+
+        entries = list(
+            (data.get("search-results") or {}).get("entry")
+            or []
+        )
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            key = str(
+                entry.get("eid")
+                or entry.get("dc:identifier")
+                or entry.get("prism:url")
+                or ""
+            ).strip()
+
+            if key:
+                entries_by_eid[key] = entry
+
+    candidates_by_id: dict[str, dict[str, Any]] = {}
+
+    for entry in entries_by_eid.values():
+
+        authors = _get_publication_authors(entry)
+
+        for author in authors:
+
+            author_id = re.sub(
+                r"\D",
+                "",
+                str(author.get("author_id") or "")
+            )
+
+            author_name = str(
+                author.get("name") or ""
+            ).strip()
+
+            if not author_id or not author_name:
+                continue
+
+            score = _name_match_score(
+                faculty_name,
+                author_name
+            )
+
+            if score < 55:
+                continue
+
+            afids = [
+                re.sub(r"\D", "", str(v))
+                for v in (author.get("afids") or [])
+                if str(v).strip()
+            ]
+
+            # If affiliation IDs are explicitly present, prefer authors who are
+            # actually attached to DSATM in that publication.
+            affiliation_bonus = 0
+
+            if (
+                DSATM_SCOPUS_AFFILIATION_ID
+                in afids
+            ):
+                affiliation_bonus = 10
+
+            final_score = min(
+                100,
+                score + affiliation_bonus
+            )
+
+            existing = candidates_by_id.get(
+                author_id
+            )
+
+            candidate = {
+                "name": author_name,
+                "author_id": author_id,
+                "affiliation":
+                    DSATM_INSTITUTION_NAME,
+                "city": "Bengaluru",
+                "country": "India",
+                "documents":
+                    int(
+                        (existing or {}).get(
+                            "documents",
+                            0
+                        )
+                    ) + 1,
+                "excel_match": False,
+                "score": final_score,
+                "source":
+                    "DSATM Scopus publication author data",
+            }
+
+            if existing:
+                candidate["score"] = max(
+                    final_score,
+                    int(existing.get("score") or 0)
+                )
+
+            candidates_by_id[
+                author_id
+            ] = candidate
+
+            # Keep the reusable in-memory directory updated.
+            DSATM_AUTHOR_DIRECTORY[
+                author_id
+            ] = candidate
+
+    candidates = list(
+        candidates_by_id.values()
+    )
+
+    candidates.sort(
+        key=lambda item: (
+            int(item.get("score") or 0),
+            int(item.get("documents") or 0),
+        ),
+        reverse=True,
+    )
+
+    return candidates[:limit]
+
+
+def find_dsatm_authors_by_name(
+    faculty_name: str,
+    max_records: int = 500
+) -> list[dict[str, Any]]:
+    return search_dsatm_author_directory(
+        faculty_name,
+        limit=15
+    )
+
+
+
+def load_dsatm_author_directory_excel() -> int:
+    """
+    Load DSATM_Author_Directory.xlsx into the in-memory author directory.
+
+    Expected columns:
+      Author Name
+      Scopus Author ID
+    """
+
+    global DSATM_AUTHOR_DIRECTORY
+
+    if not DSATM_AUTHOR_DIRECTORY_FILE.exists():
+        return 0
+
+    try:
+        df = pd.read_excel(
+            DSATM_AUTHOR_DIRECTORY_FILE,
+            engine="openpyxl"
+        )
+
+        if (
+            "Author Name" not in df.columns
+            or "Scopus Author ID" not in df.columns
+        ):
+            return 0
+
+        loaded = 0
+
+        for _, row in df.iterrows():
+            name = str(
+                row.get("Author Name")
+                or ""
+            ).strip()
+
+            author_id = re.sub(
+                r"\D",
+                "",
+                str(
+                    row.get("Scopus Author ID")
+                    or ""
+                )
+            )
+
+            if not name or not author_id:
+                continue
+
+            DSATM_AUTHOR_DIRECTORY[
+                author_id
+            ] = {
+                "name": name,
+                "author_id": author_id,
+                "affiliation":
+                    DSATM_INSTITUTION_NAME,
+                "city": "Bengaluru",
+                "country": "India",
+                "documents": 0,
+                "excel_match": True,
+                "score": 100,
+                "source":
+                    "DSATM_Author_Directory.xlsx",
+            }
+
+            loaded += 1
+
+        return loaded
+
+    except Exception as exc:
+        print(
+            "Unable to load DSATM author directory:",
+            exc
+        )
+        return 0
+
+
+def save_dsatm_author_directory_excel(
+    authors_by_id: dict[str, dict[str, Any]]
+) -> Path:
+    """
+    Save only the two requested columns:
+      Author Name
+      Scopus Author ID
+    """
+
+    rows = []
+
+    for author_id, item in authors_by_id.items():
+        name = str(
+            item.get("name")
+            or ""
+        ).strip()
+
+        clean_id = re.sub(
+            r"\D",
+            "",
+            str(author_id or "")
+        )
+
+        if not name or not clean_id:
+            continue
+
+        rows.append({
+            "Author Name": name,
+            "Scopus Author ID": clean_id,
+        })
+
+    rows.sort(
+        key=lambda item:
+            item["Author Name"].casefold()
+    )
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "Author Name",
+            "Scopus Author ID",
+        ],
+    )
+
+    temp_file = (
+        BASE_DIR
+        / "DSATM_Author_Directory_temp.xlsx"
+    )
+
+    with pd.ExcelWriter(
+        temp_file,
+        engine="openpyxl"
+    ) as writer:
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="DSATM Authors"
+        )
+
+        ws = writer.book[
+            "DSATM Authors"
+        ]
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        ws.column_dimensions["A"].width = 38
+        ws.column_dimensions["B"].width = 22
+
+        for cell in ws[1]:
+            cell.font = cell.font.copy(
+                bold=True
+            )
+
+    temp_file.replace(
+        DSATM_AUTHOR_DIRECTORY_FILE
+    )
+
+    return DSATM_AUTHOR_DIRECTORY_FILE
+
+
+def _update_author_directory_progress(**kwargs) -> None:
+    with AUTHOR_DIRECTORY_PROGRESS_LOCK:
+        AUTHOR_DIRECTORY_PROGRESS.update(kwargs)
+
+
+def build_dsatm_author_directory(
+    max_publications: int = 5000
+) -> dict[str, Any]:
+    """
+    Build DSATM_Author_Directory.xlsx with:
+      Author Name
+      Scopus Author ID
+
+    Progress is continuously written to AUTHOR_DIRECTORY_PROGRESS so the
+    frontend can display a live progress bar.
+    """
+
+    global DSATM_AUTHOR_DIRECTORY
+
+    max_publications = max(
+        25,
+        min(int(max_publications or 5000), 5000)
+    )
+
+    _update_author_directory_progress(
+        running=True,
+        stage="fetching",
+        percent=1,
+        current=0,
+        total=0,
+        authors_found=0,
+        message="Connecting to Scopus and counting DSATM publications...",
+        error="",
+        completed=False,
+    )
+
+    first = _scopus_institution_request(
+        start=0,
+        count=25
+    )
+
+    results = first.get("search-results") or {}
+
+    try:
+        total_results = int(
+            results.get("opensearch:totalResults") or 0
+        )
+    except Exception:
+        total_results = 0
+
+    entries = list(results.get("entry") or [])
+    limit = min(total_results, max_publications)
+
+    _update_author_directory_progress(
+        total=limit,
+        current=len(entries),
+        percent=2 if limit else 0,
+        message=(
+            f"DSATM publications found: {total_results}. "
+            "Loading publication records..."
+        ),
+    )
+
+    start_index = len(entries)
+
+    while start_index < limit:
+        page = _scopus_institution_request(
+            start=start_index,
+            count=min(25, limit - start_index)
+        )
+
+        page_entries = list(
+            (page.get("search-results") or {}).get("entry") or []
+        )
+
+        if not page_entries:
+            break
+
+        entries.extend(page_entries)
+        start_index += len(page_entries)
+
+        fetch_percent = 2
+        if limit:
+            fetch_percent = min(
+                20,
+                2 + int(18 * min(start_index, limit) / limit)
+            )
+
+        _update_author_directory_progress(
+            stage="fetching",
+            current=min(start_index, limit),
+            total=limit,
+            percent=fetch_percent,
+            message=(
+                f"Loading DSATM publications: "
+                f"{min(start_index, limit)} / {limit}"
+            ),
+        )
+
+    authors_by_id: dict[str, dict[str, Any]] = {}
+    documents_processed = 0
+    documents_without_author_data = 0
+
+    _update_author_directory_progress(
+        stage="authors",
+        current=0,
+        total=len(entries),
+        percent=20,
+        message="Extracting author names and Scopus Author IDs...",
+    )
+
+    for position, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+
+        documents_processed += 1
+
+        authors = _get_publication_authors(entry)
+
+        if not authors:
+            documents_without_author_data += 1
+        else:
+            for author in authors:
+                author_id = re.sub(
+                    r"\D",
+                    "",
+                    str(author.get("author_id") or "")
+                )
+
+                author_name = str(
+                    author.get("name") or ""
+                ).strip()
+
+                afids = [
+                    re.sub(r"\D", "", str(value))
+                    for value in (author.get("afids") or [])
+                    if str(value).strip()
+                ]
+
+                if not author_id or not author_name:
+                    continue
+
+                # Prefer authors explicitly linked to DSATM. If the API response
+                # omits author-level affiliation IDs, do not discard a usable
+                # author ID from a document already scoped to DSATM.
+                if (
+                    afids
+                    and DSATM_SCOPUS_AFFILIATION_ID not in afids
+                ):
+                    continue
+
+                existing = authors_by_id.get(author_id)
+
+                if existing is None:
+                    authors_by_id[author_id] = {
+                        "name": author_name,
+                        "author_id": author_id,
+                        "documents": 1,
+                    }
+                else:
+                    existing["documents"] = (
+                        int(existing.get("documents") or 0) + 1
+                    )
+
+                    if len(author_name) > len(
+                        str(existing.get("name") or "")
+                    ):
+                        existing["name"] = author_name
+
+        process_percent = 20
+        if entries:
+            process_percent = min(
+                97,
+                20 + int(77 * position / len(entries))
+            )
+
+        _update_author_directory_progress(
+            stage="authors",
+            current=position,
+            total=len(entries),
+            percent=process_percent,
+            authors_found=len(authors_by_id),
+            message=(
+                f"Processing publication {position} / {len(entries)} "
+                f"• Authors found: {len(authors_by_id)}"
+            ),
+        )
+
+    if not authors_by_id:
+        raise HTTPException(
+            502,
+            (
+                "Scopus publications were found, but no usable "
+                "author names and Scopus Author IDs could be extracted. "
+                "The current Elsevier API entitlement may not return "
+                "author-affiliation metadata for these records."
+            )
+        )
+
+    _update_author_directory_progress(
+        stage="saving",
+        percent=98,
+        authors_found=len(authors_by_id),
+        message="Creating DSATM_Author_Directory.xlsx...",
+    )
+
+    save_dsatm_author_directory_excel(authors_by_id)
+
+    DSATM_AUTHOR_DIRECTORY = {}
+
+    for author_id, item in authors_by_id.items():
+        DSATM_AUTHOR_DIRECTORY[author_id] = {
+            "name": item["name"],
+            "author_id": author_id,
+            "affiliation": DSATM_INSTITUTION_NAME,
+            "city": "Bengaluru",
+            "country": "India",
+            "documents": int(item.get("documents") or 0),
+            "excel_match": True,
+            "score": 100,
+            "source": "DSATM_Author_Directory.xlsx",
+        }
+
+    result = {
+        "success": True,
+        "institution": DSATM_INSTITUTION_NAME,
+        "affiliation_id": DSATM_SCOPUS_AFFILIATION_ID,
+        "scopus_publications": total_results,
+        "publications_processed": documents_processed,
+        "documents_without_author_data": documents_without_author_data,
+        "unique_dsatm_authors": len(authors_by_id),
+        "file": DSATM_AUTHOR_DIRECTORY_FILE.name,
+    }
+
+    _update_author_directory_progress(
+        running=False,
+        stage="complete",
+        percent=100,
+        current=len(entries),
+        total=len(entries),
+        authors_found=len(authors_by_id),
+        message=(
+            f"DSATM Author Directory ready • "
+            f"{len(authors_by_id)} authors found"
+        ),
+        error="",
+        completed=True,
+        result=result,
+    )
+
+    return result
+
+
+def _author_directory_build_worker(max_publications: int) -> None:
+    try:
+        build_dsatm_author_directory(
+            max_publications=max_publications
+        )
+    except Exception as exc:
+        detail = (
+            exc.detail
+            if isinstance(exc, HTTPException)
+            else str(exc)
+        )
+
+        _update_author_directory_progress(
+            running=False,
+            stage="error",
+            message="Unable to build DSATM Author Directory.",
+            error=str(detail),
+            completed=False,
+        )
+
+
+def search_local_dsatm_author_directory(
+    faculty_name: str,
+    limit: int = 15
+) -> list[dict[str, Any]]:
+    """
+    Search only the locally cached/persisted DSATM author directory.
+    """
+
+    faculty_name = re.sub(
+        r"\s+",
+        " ",
+        str(faculty_name or "")
+    ).strip()
+
+    if len(faculty_name) < 2:
+        return []
+
+    if not DSATM_AUTHOR_DIRECTORY:
+        load_dsatm_author_directory_excel()
+
+    candidates = []
+
+    for item in DSATM_AUTHOR_DIRECTORY.values():
+        score = _name_match_score(
+            faculty_name,
+            str(
+                item.get("name")
+                or ""
+            )
+        )
+
+        if score < 45:
+            continue
+
+        candidate = dict(item)
+        candidate["score"] = score
+
+        candidates.append(
+            candidate
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            int(
+                item.get("score")
+                or 0
+            ),
+            int(
+                item.get("documents")
+                or 0
+            ),
+        ),
+        reverse=True,
+    )
+
+    return candidates[:limit]
 
 
 def _scopus_authors(entry: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -411,37 +1448,13 @@ def record(row: pd.Series, mapping: dict[str, str | None]) -> dict[str, Any]:
     except Exception:
         pass
     doi = val("doi")
-    eid = val("eid")
-
-    doi_url = (
-        f"https://doi.org/{doi}"
-        if doi
-        else ""
-    )
-
-    scopus_url = (
-        f"https://www.scopus.com/inward/record.uri?eid={eid}&partnerID=HzOxMe3b"
-        if eid
-        else ""
-    )
-
-    link = doi_url or val("link")
+    link = val("link") or (f"https://doi.org/{doi}" if doi else "")
     return {
-        "title": val("title", "Untitled publication"),
-        "authors": val("authors"),
-        "author_ids": val("author_ids"),
-        "year": year,
-        "source": val("source"),
-        "citations": citations_num,
-        "doi": doi,
-        "doi_url": doi_url,
-        "document_type": val("document_type"),
-        "eid": eid,
-        "link": link,
-        "scopus_url": scopus_url,
-        "abstract": val("abstract"),
-        "keywords": val("keywords"),
-        "sheet": str(row.get("_sheet", "")),
+        "title": val("title", "Untitled publication"), "authors": val("authors"),
+        "author_ids": val("author_ids"), "year": year, "source": val("source"),
+        "citations": citations_num, "doi": doi, "document_type": val("document_type"),
+        "eid": val("eid"), "link": link, "abstract": val("abstract"),
+        "keywords": val("keywords"), "sheet": str(row.get("_sheet", "")),
     }
 
 
@@ -558,9 +1571,25 @@ def institution_overall(df: pd.DataFrame, mapping: dict[str, str | None], meta: 
     }
 
 
+
+# =========================================================
+# AUTO LOAD DSATM AUTHOR DIRECTORY
+# =========================================================
+_loaded_author_count = load_dsatm_author_directory_excel()
+print(
+    "DSATM author directory loaded:",
+    _loaded_author_count,
+    "authors"
+)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={}
+    )
 
 
 @app.get("/api/health")
@@ -782,186 +1811,299 @@ def summary(department: str = ""):
 
 
 @app.get("/api/scopus/test")
-@app.get("/api/scopus/test")
 def api_scopus_test():
 
-    try:
-
-        api_key = os.getenv(
-            "ELS_API_KEY",
-            ""
-        ).strip()
-
-        if not api_key:
-            return {
-                "success": False,
-                "message": "ELS_API_KEY is missing from .env"
-            }
-
-        headers = {
-            "X-ELS-APIKey": api_key,
-            "Accept": "application/json"
-        }
-
-        inst_token = os.getenv(
-            "ELS_INST_TOKEN",
-            ""
-        ).strip()
-
-        if inst_token:
-            headers["X-ELS-Insttoken"] = inst_token
-
-        params = {
-            "query": "TITLE(test)",
-            "count": 1
-        }
-
-        response = requests.get(
-            SCOPUS_SEARCH_URL,
-            headers=headers,
-            params=params,
-            timeout=20
-        )
-
-        if response.ok:
-
-            return {
-                "success": True,
-                "status_code": response.status_code,
-                "message": "Scopus API connection successful"
-            }
-
-        return {
-            "success": False,
-            "status_code": response.status_code,
-            "message": response.text
-        }
-
-    except requests.exceptions.ConnectTimeout:
-
-        return {
-            "success": False,
-            "message":
-                "Connection to Elsevier Scopus timed out."
-        }
-
-    except requests.exceptions.ReadTimeout:
-
-        return {
-            "success": False,
-            "message":
-                "Elsevier Scopus server did not respond within 60 seconds. "
-                "Check internet/institutional network and try again."
-        }
-
-    except requests.exceptions.ConnectionError as e:
-
-        return {
-            "success": False,
-            "message":
-                "Unable to connect to api.elsevier.com. "
-                "Check internet, VPN, proxy or institutional network.",
-            "error": str(e)
-        }
-
-    except Exception as e:
-
-        return {
-            "success": False,
-            "message": str(e)
-        }
     response = requests.get(
         SCOPUS_SEARCH_URL,
         headers=scopus_headers(),
-        params={"query": "TITLE(test)", "count": 1},
+        params={
+            "query": "TITLE(test)",
+            "count": 1
+        },
         timeout=20,
     )
+
     if not response.ok:
-        raise HTTPException(response.status_code, response.text[:800])
-    return {"success": True, "status_code": response.status_code, "message": "Scopus API connection successful"}
+        raise HTTPException(
+            response.status_code,
+            response.text[:800]
+        )
 
-@app.get("/api/scopus/author-search")
-def api_scopus_author_search(name: str, institution: str = ""):
-    """Search Scopus authors by name and return candidates for user confirmation."""
-    name = re.sub(r"\s+", " ", str(name or "")).strip()
-    if len(name) < 2:
-        raise HTTPException(400, "Enter at least 2 characters of the faculty name.")
-
-    # Author Search API syntax. AFFIL is optional and helps narrow common names.
-    query = f'AUTHLASTNAME({name.split()[-1]})'
-    response = requests.get(
-        "https://api.elsevier.com/content/search/author",
-        headers=scopus_headers(),
-        params={"query": query, "count": 25, "start": 0},
-        timeout=30,
-    )
-    if not response.ok:
-        raise HTTPException(response.status_code, f"Scopus Author Search error: {response.text[:800]}")
-
-    results = response.json().get("search-results", {})
-    entries = list(results.get("entry") or [])
-    wanted = norm(name)
-    institution_norm = norm(institution)
-    candidates = []
-
-    for e in entries:
-        preferred = e.get("preferred-name") or {}
-        indexed = str(preferred.get("ce:indexed-name") or e.get("dc:title") or "").strip()
-        given = str(preferred.get("ce:given-name") or "").strip()
-        surname = str(preferred.get("ce:surname") or "").strip()
-        display = indexed or " ".join(x for x in (given, surname) if x).strip()
-        author_id = str(e.get("dc:identifier") or "").replace("AUTHOR_ID:", "").strip()
-        affiliation = e.get("affiliation-current") or {}
-        if isinstance(affiliation, list):
-            affiliation = affiliation[0] if affiliation else {}
-        affiliation_name = str(affiliation.get("affiliation-name") or "").strip() if isinstance(affiliation, dict) else ""
-        city = str(affiliation.get("affiliation-city") or "").strip() if isinstance(affiliation, dict) else ""
-        country = str(affiliation.get("affiliation-country") or "").strip() if isinstance(affiliation, dict) else ""
-        try:
-            documents = int(e.get("document-count") or 0)
-        except Exception:
-            documents = 0
-
-        # Ranking only; never silently select a same-name author.
-        display_norm = norm(display)
-        score = 0
-        if wanted == display_norm:
-            score += 100
-        elif wanted in display_norm or display_norm in wanted:
-            score += 60
-        name_tokens = set(wanted.split())
-        score += 8 * len(name_tokens & set(display_norm.split()))
-        if institution_norm and institution_norm in norm(affiliation_name):
-            score += 50
-
-        # Prefer exact faculty ID already present in uploaded Excel, when available.
-        excel_match = None
-        for row in faculty_meta_cache:
-            if norm(row.get("faculty", "")) == wanted:
-                excel_id = re.sub(r"\D", "", str(row.get("scopus_author_id") or ""))
-                if excel_id and excel_id == re.sub(r"\D", "", author_id):
-                    score += 200
-                    excel_match = True
-                    break
-
-        candidates.append({
-            "name": display or f"Scopus Author {author_id}",
-            "author_id": author_id,
-            "affiliation": affiliation_name,
-            "city": city,
-            "country": country,
-            "documents": documents,
-            "excel_match": bool(excel_match),
-            "score": score,
-        })
-
-    candidates = [c for c in candidates if c["author_id"]]
-    candidates.sort(key=lambda c: (c["score"], c["documents"]), reverse=True)
     return {
         "success": True,
-        "query": name,
-        "total_results": int(results.get("opensearch:totalResults") or 0),
-        "candidates": candidates[:15],
+        "status_code":
+            response.status_code,
+        "message":
+            "Scopus API connection successful"
+    }
+
+
+@app.get("/api/scopus/institution-search")
+def api_scopus_institution_search():
+
+    data = _scopus_institution_request(
+        start=0,
+        count=5
+    )
+
+    results = (
+        data.get(
+            "search-results"
+        )
+        or {}
+    )
+
+    entries = list(
+        results.get("entry")
+        or []
+    )
+
+    return {
+        "success": True,
+        "institution":
+            DSATM_INSTITUTION_NAME,
+        "affiliation_id":
+            DSATM_SCOPUS_AFFILIATION_ID,
+        "total_results":
+            results.get(
+                "opensearch:totalResults"
+            ),
+        "returned_records":
+            len(entries),
+        "entries":
+            entries,
+    }
+
+
+@app.get("/api/scopus/build-author-directory")
+def api_build_dsatm_author_directory(
+    max_publications: int = 5000
+):
+    """
+    Synchronous/manual build endpoint. The GUI uses the background endpoint.
+    """
+    return build_dsatm_author_directory(
+        max_publications=max_publications
+    )
+
+
+@app.post("/api/scopus/start-author-directory-build")
+def api_start_author_directory_build(
+    max_publications: int = 5000,
+    refresh: bool = False
+):
+    """
+    Start author-directory creation in the background.
+    """
+
+    if (
+        DSATM_AUTHOR_DIRECTORY_FILE.exists()
+        and not refresh
+    ):
+        loaded = load_dsatm_author_directory_excel()
+
+        return {
+            "success": True,
+            "started": False,
+            "already_ready": True,
+            "authors_loaded": loaded,
+            "message": "DSATM Author Directory is already ready.",
+        }
+
+    with AUTHOR_DIRECTORY_PROGRESS_LOCK:
+        if AUTHOR_DIRECTORY_PROGRESS.get("running"):
+            return {
+                "success": True,
+                "started": False,
+                "already_running": True,
+                "progress": dict(AUTHOR_DIRECTORY_PROGRESS),
+            }
+
+        AUTHOR_DIRECTORY_PROGRESS.update({
+            "running": True,
+            "stage": "starting",
+            "percent": 0,
+            "current": 0,
+            "total": 0,
+            "authors_found": 0,
+            "message": "Starting DSATM Author Directory build...",
+            "error": "",
+            "completed": False,
+        })
+
+    thread = threading.Thread(
+        target=_author_directory_build_worker,
+        args=(max_publications,),
+        daemon=True,
+        name="dsatm-author-directory-builder",
+    )
+    thread.start()
+
+    return {
+        "success": True,
+        "started": True,
+        "message": "DSATM Author Directory build started.",
+    }
+
+
+@app.get("/api/scopus/author-directory-progress")
+def api_author_directory_progress():
+    with AUTHOR_DIRECTORY_PROGRESS_LOCK:
+        progress = dict(AUTHOR_DIRECTORY_PROGRESS)
+
+    progress["directory_ready"] = (
+        DSATM_AUTHOR_DIRECTORY_FILE.exists()
+    )
+    progress["directory_file"] = (
+        DSATM_AUTHOR_DIRECTORY_FILE.name
+    )
+    progress["cached_authors"] = len(
+        DSATM_AUTHOR_DIRECTORY
+    )
+
+    return progress
+
+
+@app.get("/api/scopus/author-directory-status")
+def api_author_directory_status():
+    if (
+        DSATM_AUTHOR_DIRECTORY_FILE.exists()
+        and not DSATM_AUTHOR_DIRECTORY
+    ):
+        load_dsatm_author_directory_excel()
+
+    with AUTHOR_DIRECTORY_PROGRESS_LOCK:
+        running = bool(
+            AUTHOR_DIRECTORY_PROGRESS.get("running")
+        )
+
+    return {
+        "success": True,
+        "directory_ready":
+            DSATM_AUTHOR_DIRECTORY_FILE.exists(),
+        "running":
+            running,
+        "file":
+            DSATM_AUTHOR_DIRECTORY_FILE.name,
+        "authors_loaded":
+            len(DSATM_AUTHOR_DIRECTORY),
+        "source":
+            "DSATM_Author_Directory.xlsx",
+    }
+
+
+@app.get("/api/scopus/download-author-directory")
+def api_download_dsatm_author_directory():
+
+    if not DSATM_AUTHOR_DIRECTORY_FILE.exists():
+        raise HTTPException(
+            404,
+            (
+                "DSATM_Author_Directory.xlsx has not been "
+                "created yet."
+            )
+        )
+
+    file_bytes = (
+        DSATM_AUTHOR_DIRECTORY_FILE.read_bytes()
+    )
+
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition":
+                'attachment; filename="DSATM_Author_Directory.xlsx"'
+        },
+    )
+
+
+@app.get("/api/scopus/institution-authors")
+def api_scopus_institution_authors():
+
+    if not DSATM_AUTHOR_DIRECTORY:
+        load_dsatm_author_directory_excel()
+
+    rows = sorted(
+        DSATM_AUTHOR_DIRECTORY.values(),
+        key=lambda item:
+            str(item.get("name") or "").casefold(),
+    )
+
+    return {
+        "success": True,
+        "institution":
+            DSATM_INSTITUTION_NAME,
+        "affiliation_id":
+            DSATM_SCOPUS_AFFILIATION_ID,
+        "cached_authors":
+            len(rows),
+        "directory_file":
+            DSATM_AUTHOR_DIRECTORY_FILE.name,
+        "file_exists":
+            DSATM_AUTHOR_DIRECTORY_FILE.exists(),
+        "authors":
+            rows,
+    }
+
+
+@app.get("/api/scopus/author-search")
+def api_scopus_author_search(
+    name: str,
+    institution: str = ""
+):
+
+    name = re.sub(
+        r"\s+",
+        " ",
+        str(name or "")
+    ).strip()
+
+    if len(name) < 2:
+        raise HTTPException(
+            400,
+            "Enter at least 2 characters of the faculty name."
+        )
+
+    if not DSATM_AUTHOR_DIRECTORY_FILE.exists():
+        raise HTTPException(
+            503,
+            (
+                "DSATM_Author_Directory.xlsx is missing from the project root. "
+                "Copy the supplied file beside app.py and restart the server."
+            )
+        )
+
+    candidates = (
+        search_local_dsatm_author_directory(
+            name,
+            limit=15
+        )
+    )
+
+    return {
+        "success": True,
+        "query":
+            name,
+        "institution":
+            DSATM_INSTITUTION_NAME,
+        "affiliation_id":
+            DSATM_SCOPUS_AFFILIATION_ID,
+        "total_results":
+            len(candidates),
+        "candidates":
+            candidates,
+        "source":
+            "DSATM_Author_Directory.xlsx",
+        "directory_ready":
+            DSATM_AUTHOR_DIRECTORY_FILE.exists(),
+        "cached_authors":
+            len(
+                DSATM_AUTHOR_DIRECTORY
+            ),
     }
 
 
@@ -1038,22 +2180,7 @@ def api_scopus_author(author_id: str):
                 "prism:doi",
                 ""
             )
-            eid = item.get(
-                "eid",
-                ""
-            )
 
-            doi_url = (
-                f"https://doi.org/{doi}"
-                if doi
-                else ""
-            )
-
-            scopus_url = (
-                f"https://www.scopus.com/inward/record.uri?eid={eid}&partnerID=HzOxMe3b"
-                if eid
-                else ""
-            )
             publications.append({
 
                 "title":
@@ -1101,19 +2228,19 @@ def api_scopus_author(author_id: str):
                     ),
 
                 "eid":
-                    eid,
-
-                "doi_url":
-                    doi_url,
-
-                "scopus_url":
-                    scopus_url,
+                    item.get(
+                        "eid",
+                        ""
+                    ),
 
                 "link":
-                    doi_url
-                    or item.get(
-                        "prism:url",
-                        ""
+                    (
+                        f"https://doi.org/{doi}"
+                        if doi
+                        else item.get(
+                            "prism:url",
+                            ""
+                        )
                     )
             })
 
@@ -1413,1987 +2540,174 @@ def api_scopus_author(author_id: str):
             "error": str(e)
         }
 
+
+
 # =========================================================
-# INSTITUTION SCOPUS SYNC HELPERS
+# GITHUB MASTER EXCEL PERSISTENCE
 # =========================================================
 
-def _listify(value):
+def _github_settings() -> dict[str, str]:
+    settings = {
+        "token": os.getenv("GITHUB_TOKEN", "").strip(),
+        "owner": os.getenv("GITHUB_OWNER", "shreenidhibs").strip(),
+        "repo": os.getenv("GITHUB_REPO", "DSATM-Scopus-AI").strip(),
+        "branch": os.getenv("GITHUB_BRANCH", "main").strip(),
+        "excel_path": os.getenv(
+            "GITHUB_EXCEL_PATH",
+            "DSATM Scopus Master.xlsx"
+        ).strip(),
+    }
 
-    if value is None:
-        return []
+    missing = [
+        key for key in ("token", "owner", "repo", "branch", "excel_path")
+        if not settings.get(key)
+    ]
 
-    if isinstance(value, list):
-        return value
-
-    return [value]
-
-
-def _clean_scopus_id(value):
-
-    return re.sub(
-        r"\D",
-        "",
-        str(value or "")
-    )
-
-
-def _institution_scopus_page(
-    start: int = 0,
-    count: int = 25
-):
-
-    """
-    Retrieve DSATM publications using the official
-    Scopus Affiliation ID.
-    """
-
-    count = max(
-        1,
-        min(int(count or 25), 25)
-    )
-
-    response = requests.get(
-        SCOPUS_SEARCH_URL,
-
-        headers=scopus_headers(),
-
-        params={
-            "query":
-                f"AF-ID({DSATM_SCOPUS_AFFILIATION_ID})",
-
-            "start":
-                start,
-
-            "count":
-                count,
-
-            "sort":
-                "-coverDate",
-
-            "view":
-                "STANDARD"
-        },
-
-        timeout=(10, 60)
-    )
-
-    if not response.ok:
-
+    if missing:
         raise HTTPException(
-            response.status_code,
-            "Institution Scopus search failed: "
-            + response.text[:800]
+            500,
+            "Missing GitHub configuration: " + ", ".join(missing)
         )
 
-    return response.json()
-
-
-def get_all_institution_scopus_documents():
-
-    """
-    Retrieve every Scopus document associated with
-    DSATM affiliation ID.
-    """
-
-    global SCOPUS_SYNC_PROGRESS
-
-    SCOPUS_SYNC_PROGRESS.update({
-        "running": True,
-        "stage": "searching",
-        "current": 0,
-        "total": 0,
-        "percent": 0,
-        "message":
-            "Retrieving DSATM documents from Scopus..."
-    })
-
-    first = _institution_scopus_page(
-        start=0,
-        count=25
-    )
-
-    result = (
-        first.get(
-            "search-results",
-            {}
-        )
-    )
-
-    try:
-
-        total = int(
-            result.get(
-                "opensearch:totalResults",
-                0
-            )
-            or 0
-        )
-
-    except Exception:
-
-        total = 0
-
-
-    entries = list(
-        result.get(
-            "entry",
-            []
-        )
-        or []
-    )
-
-
-    SCOPUS_SYNC_PROGRESS.update({
-        "total": total,
-        "current": len(entries),
-        "percent":
-            round(
-                len(entries) /
-                max(total, 1) *
-                100
-            ),
-        "message":
-            f"Retrieved {len(entries)} of "
-            f"{total} institution documents"
-    })
-
-
-    start = len(entries)
-
-
-    while start < total:
-
-        page = _institution_scopus_page(
-            start=start,
-            count=25
-        )
-
-
-        page_entries = list(
-            (
-                page.get(
-                    "search-results",
-                    {}
-                )
-                .get(
-                    "entry",
-                    []
-                )
-            )
-            or []
-        )
-
-
-        if not page_entries:
-            break
-
-
-        entries.extend(
-            page_entries
-        )
-
-
-        start += len(
-            page_entries
-        )
-
-
-        SCOPUS_SYNC_PROGRESS.update({
-            "stage":
-                "searching",
-
-            "current":
-                min(
-                    len(entries),
-                    total
-                ),
-
-            "total":
-                total,
-
-            "percent":
-                round(
-                    len(entries) /
-                    max(total, 1) *
-                    100
-                ),
-
-            "message":
-                f"Retrieved {len(entries)} "
-                f"of {total} institution documents"
-        })
-
-
-    return entries, total
-
-
-def _scopus_entry_authors(entry):
-
-    """
-    Author names and IDs available directly
-    in Scopus Search response.
-    """
-
-    names = []
-    ids = []
-
-
-    authors = _listify(
-        entry.get("author")
-    )
-
-
-    for author in authors:
-
-        if not isinstance(
-            author,
-            dict
-        ):
-            continue
-
-
-        name = str(
-            author.get(
-                "authname"
-            )
-            or
-            author.get(
-                "ce:indexed-name"
-            )
-            or
-            ""
-        ).strip()
-
-
-        author_id = _clean_scopus_id(
-            author.get(
-                "authid"
-            )
-            or
-            author.get(
-                "@auid"
-            )
-        )
-
-
-        if name:
-            names.append(name)
-
-        if author_id:
-            ids.append(author_id)
-
-
-    # Standard search sometimes only provides creator.
-    if not names:
-
-        creator = str(
-            entry.get(
-                "dc:creator"
-            )
-            or ""
-        ).strip()
-
-        if creator:
-            names.append(
-                creator
-            )
-
-
-    return names, ids
-
-
-def _scopus_entry_affiliations(entry):
-
-    affiliations = []
-
-    raw = _listify(
-        entry.get(
-            "affiliation"
-        )
-    )
-
-
-    for item in raw:
-
-        if not isinstance(
-            item,
-            dict
-        ):
-            continue
-
-
-        name = str(
-            item.get(
-                "affilname"
-            )
-            or
-            item.get(
-                "affiliation-name"
-            )
-            or ""
-        ).strip()
-
-
-        if name:
-            affiliations.append(
-                name
-            )
-
-
-    return affiliations
-
-
-def _abstract_metadata(eid: str):
-
-    """
-    Retrieve detailed author-affiliation metadata.
-
-    META_ABS gives author list and affiliation IDs.
-    """
-
-    if not eid:
-        return {}
-
-
-    response = requests.get(
-        "https://api.elsevier.com/"
-        f"content/abstract/eid/{eid}",
-
-        headers=scopus_headers(),
-
-        params={
-            "view": "META_ABS"
-        },
-
-        timeout=(10, 60)
-    )
-
-
-    if not response.ok:
-
-        return {}
-
-
-    try:
-
-        return response.json()
-
-    except Exception:
-
-        return {}
-
-
-def _authors_from_abstract(data):
-
-    """
-    Returns:
-        all_authors
-        institution_authors
-
-    institution_authors only contains authors whose
-    affiliation reference matches DSATM affiliation ID.
-    """
-
-    all_authors = []
-    institution_authors = []
-
-
-    response = (
-        data.get(
-            "abstracts-retrieval-response",
-            {}
-        )
-        if isinstance(data, dict)
-        else {}
-    )
-
-
-    authors_node = (
-        response.get(
-            "authors"
-        )
-        or {}
-    )
-
-
-    if isinstance(
-        authors_node,
-        dict
-    ):
-
-        raw_authors = _listify(
-            authors_node.get(
-                "author"
-            )
-        )
-
-    else:
-
-        raw_authors = []
-
-
-    for author in raw_authors:
-
-        if not isinstance(
-            author,
-            dict
-        ):
-            continue
-
-
-        name = str(
-            author.get(
-                "ce:indexed-name"
-            )
-            or
-            author.get(
-                "preferred-name"
-            )
-            or
-            author.get(
-                "authname"
-            )
-            or ""
-        ).strip()
-
-
-        author_id = _clean_scopus_id(
-            author.get(
-                "@auid"
-            )
-            or
-            author.get(
-                "authid"
-            )
-        )
-
-
-        if not name:
-            continue
-
-
-        author_info = {
-            "name":
-                name,
-
-            "author_id":
-                author_id
-        }
-
-
-        all_authors.append(
-            author_info
-        )
-
-
-        affiliation_refs = _listify(
-            author.get(
-                "affiliation"
-            )
-        )
-
-
-        author_affiliation_ids = set()
-
-
-        for ref in affiliation_refs:
-
-            if not isinstance(
-                ref,
-                dict
-            ):
-                continue
-
-
-            afid = _clean_scopus_id(
-                ref.get(
-                    "@id"
-                )
-                or
-                ref.get(
-                    "@afid"
-                )
-                or
-                ref.get(
-                    "afid"
-                )
-            )
-
-
-            if afid:
-                author_affiliation_ids.add(
-                    afid
-                )
-
-
-        if (
-            DSATM_SCOPUS_AFFILIATION_ID
-            in author_affiliation_ids
-        ):
-
-            institution_authors.append(
-                author_info
-            )
-
-
-    return (
-        all_authors,
-        institution_authors
-    )
-
-
-def _entry_scopus_link(entry):
-
-    links = _listify(
-        entry.get(
-            "link"
-        )
-    )
-
-
-    for link in links:
-
-        if (
-            isinstance(
-                link,
-                dict
-            )
-            and
-            link.get(
-                "@ref"
-            )
-            == "scopus"
-        ):
-
-            return str(
-                link.get(
-                    "@href"
-                )
-                or ""
-            )
-
-
-    return str(
-        entry.get(
-            "prism:url"
-        )
-        or ""
-    )
-
-
-def _document_key_from_entry(entry):
-
-    eid = str(
-        entry.get(
-            "eid"
-        )
-        or ""
-    ).strip()
-
-
-    if eid:
-        return (
-            "EID:"
-            +
-            eid.lower()
-        )
-
-
-    doi = str(
-        entry.get(
-            "prism:doi"
-        )
-        or ""
-    ).strip().lower()
-
-
-    if doi:
-        return (
-            "DOI:"
-            +
-            doi
-        )
-
-
-    scopus_id = str(
-        entry.get(
-            "dc:identifier"
-        )
-        or ""
-    ).strip()
-
-
-    if scopus_id:
-
-        return (
-            "SCOPUS:"
-            +
-            scopus_id.lower()
-        )
-
-
-    title = norm(
-        entry.get(
-            "dc:title"
-        )
-        or ""
-    )
-
-
-    date = str(
-        entry.get(
-            "prism:coverDate"
-        )
-        or ""
-    )
-
-
-    return (
-        "TITLE:"
-        +
-        title
-        +
-        "|"
-        +
-        date[:4]
-    )
-
-
-def _document_key_from_excel_row(
-    row,
-    mapping
-):
-
-    eid_col = mapping.get(
-        "eid"
-    )
-
-
-    if (
-        eid_col
-        and
-        eid_col in row.index
-    ):
-
-        eid = str(
-            row.get(
-                eid_col
-            )
-            or ""
-        ).strip()
-
-        if eid:
-            return (
-                "EID:"
-                +
-                eid.lower()
-            )
-
-
-    doi_col = mapping.get(
-        "doi"
-    )
-
-
-    if (
-        doi_col
-        and
-        doi_col in row.index
-    ):
-
-        doi = str(
-            row.get(
-                doi_col
-            )
-            or ""
-        ).strip().lower()
-
-        if doi:
-            return (
-                "DOI:"
-                +
-                doi
-            )
-
-
-    title_col = mapping.get(
-        "title"
-    )
-
-    year_col = mapping.get(
-        "year"
-    )
-
-
-    title = (
-        norm(
-            row.get(
-                title_col
-            )
-        )
-        if title_col
-        else ""
-    )
-
-
-    year = (
-        str(
-            row.get(
-                year_col
-            )
-            or ""
-        )
-        if year_col
-        else ""
-    )
-
-
-    return (
-        "TITLE:"
-        +
-        title
-        +
-        "|"
-        +
-        year[:4]
-    )
-
-
-def _set_mapped_value(
-    row,
-    mapping,
-    key,
-    value
-):
-
-    column = mapping.get(
-        key
-    )
-
-
-    if column:
-
-        row[column] = value
-
-
-def _build_new_master_row(
-    entry,
-    mapping,
-    columns,
-    all_authors,
-    institution_authors
-):
-
-    row = {
-        col: ""
-        for col in columns
+    return settings
+
+
+def _github_headers() -> dict[str, str]:
+    cfg = _github_settings()
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {cfg['token']}",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
-    cover_date = str(
-        entry.get(
-            "prism:coverDate"
-        )
-        or ""
+def _github_content_url(path: str) -> str:
+    cfg = _github_settings()
+    encoded_path = quote(path, safe="/")
+    return (
+        f"https://api.github.com/repos/"
+        f"{cfg['owner']}/{cfg['repo']}/contents/{encoded_path}"
     )
 
 
-    try:
+def _github_existing_file(path: str) -> dict[str, Any] | None:
+    cfg = _github_settings()
 
-        citation_count = int(
-            entry.get(
-                "citedby-count"
-            )
-            or 0
-        )
-
-    except Exception:
-
-        citation_count = 0
-
-
-    author_names = [
-        x["name"]
-        for x in all_authors
-        if x.get("name")
-    ]
-
-
-    author_ids = [
-        x["author_id"]
-        for x in all_authors
-        if x.get("author_id")
-    ]
-
-
-    if not author_names:
-
-        names, ids = (
-            _scopus_entry_authors(
-                entry
-            )
-        )
-
-        author_names = names
-        author_ids = ids
-
-
-    institution_author_affiliations = []
-
-    for author in institution_authors:
-
-        institution_author_affiliations.append(
-            f'{author["name"]}, '
-            f'{DSATM_INSTITUTION_NAME}'
-        )
-
-
-    affiliations = (
-        _scopus_entry_affiliations(
-            entry
-        )
+    response = requests.get(
+        _github_content_url(path),
+        headers=_github_headers(),
+        params={"ref": cfg["branch"]},
+        timeout=30,
     )
 
+    if response.status_code == 404:
+        return None
 
-    _set_mapped_value(
-        row,
-        mapping,
-        "title",
-        str(
-            entry.get(
-                "dc:title"
-            )
-            or ""
-        )
-    )
+    if not response.ok:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text[:1000]
 
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "authors",
-        "; ".join(
-            author_names
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "author_ids",
-        "; ".join(
-            author_ids
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "authors_affiliations",
-        "; ".join(
-            institution_author_affiliations
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "affiliations",
-        "; ".join(
-            affiliations
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "year",
-        cover_date[:4]
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "source",
-        str(
-            entry.get(
-                "prism:publicationName"
-            )
-            or ""
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "cited_by",
-        citation_count
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "doi",
-        str(
-            entry.get(
-                "prism:doi"
-            )
-            or ""
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "document_type",
-        str(
-            entry.get(
-                "subtypeDescription"
-            )
-            or
-            entry.get(
-                "subtype"
-            )
-            or ""
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "eid",
-        str(
-            entry.get(
-                "eid"
-            )
-            or ""
-        )
-    )
-
-
-    _set_mapped_value(
-        row,
-        mapping,
-        "link",
-        _entry_scopus_link(
-            entry
-        )
-    )
-            # =========================================================
-            # PERMANENT SCOPUS IDENTIFIERS
-            # =========================================================
-    row["Scopus EID"] = str(
-        entry.get("eid") or ""
-        ).strip()
-
-    scopus_document_id = str(
-        entry.get("dc:identifier") or ""
-        ).strip()
-
-    scopus_document_id = (
-        scopus_document_id
-        .replace("SCOPUS_ID:", "")
-        .strip()
+        raise HTTPException(
+            502,
+            f"GitHub file lookup failed ({response.status_code}): {detail}"
         )
 
-    row["Scopus Document ID"] = (
-        scopus_document_id
+    data = response.json()
+
+    if not isinstance(data, dict):
+        raise HTTPException(
+            502,
+            "GitHub returned an unexpected response for the master Excel file."
         )
 
-    return row
+    return data
 
-@app.get("/api/scopus/sync-progress")
-def scopus_sync_progress():
 
-    return dict(
-        SCOPUS_SYNC_PROGRESS
+def commit_excel_bytes_to_github(
+    excel_bytes: bytes,
+    *,
+    path: str | None = None,
+    commit_message: str | None = None,
+) -> dict[str, Any]:
+    """
+    Create or replace the configured Excel file in GitHub.
+
+    GitHub requires the current blob SHA when replacing an existing file.
+    """
+
+    cfg = _github_settings()
+    target_path = (path or cfg["excel_path"]).strip()
+
+    existing = _github_existing_file(target_path)
+
+    payload: dict[str, Any] = {
+        "message": commit_message or (
+            "Auto-update DSATM Scopus master from Live Scopus"
+        ),
+        "content": base64.b64encode(excel_bytes).decode("ascii"),
+        "branch": cfg["branch"],
+    }
+
+    if existing and existing.get("sha"):
+        payload["sha"] = existing["sha"]
+
+    response = requests.put(
+        _github_content_url(target_path),
+        headers=_github_headers(),
+        json=payload,
+        timeout=60,
     )
 
-# =========================================================
-# FULL DSATM INSTITUTION SCOPUS SYNCHRONIZATION
-# =========================================================
+    if response.status_code not in (200, 201):
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text[:1500]
+
+        raise HTTPException(
+            502,
+            f"GitHub update failed ({response.status_code}): {detail}"
+        )
+
+    data = response.json()
+    commit = data.get("commit") or {}
+    content = data.get("content") or {}
+
+    return {
+        "success": True,
+        "path": target_path,
+        "branch": cfg["branch"],
+        "repository": f"{cfg['owner']}/{cfg['repo']}",
+        "commit_sha": commit.get("sha", ""),
+        "commit_url": commit.get("html_url", ""),
+        "file_url": content.get("html_url", ""),
+        "created": response.status_code == 201,
+    }
+
+
+@app.get("/api/github/update-status")
+def github_update_status():
+    """Check whether GitHub persistence is configured without exposing the token."""
+    cfg = {
+        "token_set": bool(os.getenv("GITHUB_TOKEN", "").strip()),
+        "owner": os.getenv("GITHUB_OWNER", "shreenidhibs").strip(),
+        "repo": os.getenv("GITHUB_REPO", "DSATM-Scopus-AI").strip(),
+        "branch": os.getenv("GITHUB_BRANCH", "main").strip(),
+        "excel_path": os.getenv(
+            "GITHUB_EXCEL_PATH",
+            "DSATM Scopus Master.xlsx"
+        ).strip(),
+    }
+    return {
+        "success": True,
+        **cfg,
+    }
+
 
 @app.get("/api/scopus/refresh-excel")
-def refresh_excel_from_scopus():
-
-    global faculty_meta_cache
-    global SCOPUS_SYNC_PROGRESS
-
-
-    if STATE.get("df") is None:
-
-        raise HTTPException(
-            400,
-            "No institutional Excel dataset is loaded."
-        )
-
-    # =========================================================
-    # ENSURE PERMANENT SCOPUS IDENTIFIER COLUMNS
-    # =========================================================
-
-    try:
-
-        # =================================================
-        # START
-        # =================================================
-
-        SCOPUS_SYNC_PROGRESS.update({
-            "running": True,
-            "stage": "starting",
-            "current": 0,
-            "total": 0,
-            "percent": 0,
-            "faculty": "",
-            "new_publications": 0,
-            "updated_publications": 0,
-            "new_authors": 0,
-            "issues": 0,
-            "message":
-                "Starting DSATM institutional Scopus sync..."
-        })
-
-
-        # =================================================
-        # CURRENT MASTER DATA
-        # =================================================
-
-        existing_df = STATE["df"].copy()
-
-        if "Scopus EID" not in existing_df.columns:
-            existing_df["Scopus EID"] = ""
-
-        if "Scopus Document ID" not in existing_df.columns:
-            existing_df["Scopus Document ID"] = ""
-
-        # _sheet is internal to our reader.
-        if "_sheet" in existing_df.columns:
-
-            existing_df = (
-                existing_df.drop(
-                    columns=[
-                        "_sheet"
-                    ]
-                )
-            )
-
-
-        mapping = infer_mapping(
-            existing_df.columns
-        )
-
-
-        columns = list(
-            existing_df.columns
-        )
-
-
-        existing_count = len(
-            existing_df
-        )
-
-
-        # =================================================
-        # FETCH ALL DOCUMENTS BY DSATM AFFILIATION ID
-        # =================================================
-
-        institution_entries, scopus_total = (
-            get_all_institution_scopus_documents()
-        )
-
-
-        if not institution_entries:
-
-            raise HTTPException(
-                502,
-                "Scopus returned no documents for "
-                f"Affiliation ID "
-                f"{DSATM_SCOPUS_AFFILIATION_ID}."
-            )
-
-
-        # =================================================
-        # BUILD CURRENT DOCUMENT INDEX
-        # =================================================
-
-        existing_keys = {}
-
-
-        for index, row in (
-            existing_df.iterrows()
-        ):
-
-            key = (
-                _document_key_from_excel_row(
-                    row,
-                    mapping
-                )
-            )
-
-            if key:
-
-                existing_keys[key] = index
-
-
-        # =================================================
-        # KNOWN FACULTY IDS
-        # =================================================
-
-        known_author_ids = set()
-
-
-        for item in (
-            STATE.get(
-                "faculty_meta",
-                []
-            )
-        ):
-
-            sid = _clean_scopus_id(
-                item.get(
-                    "scopus_author_id"
-                )
-            )
-
-            if sid:
-                known_author_ids.add(
-                    sid
-                )
-
-
-        new_rows = []
-
-        new_authors = {}
-
-        updated_publications = 0
-
-        issues = []
-
-
-        total_to_process = len(
-            institution_entries
-        )
-
-
-                # =================================================
-        # PROCESS EVERY INSTITUTION DOCUMENT
-        # =================================================
-
-        for position, entry in enumerate(
-            institution_entries,
-            start=1
-        ):
-
-            key = _document_key_from_entry(
-                entry
-            )
-
-            title = str(
-                entry.get(
-                    "dc:title"
-                )
-                or ""
-            ).strip()
-
-            percent = round(
-                position /
-                max(total_to_process, 1)
-                * 100
-            )
-
-            SCOPUS_SYNC_PROGRESS.update({
-                "running": True,
-                "stage": "synchronizing",
-                "current": position,
-                "total": total_to_process,
-                "percent": percent,
-                "message":
-                    f"Processing {position} / "
-                    f"{total_to_process}: "
-                    f"{title[:70]}"
-            })
-
-
-            # =============================================
-            # EXISTING DOCUMENT
-            # Update citation / metadata
-            # =============================================
-
-            if key in existing_keys:
-
-                index = (
-                    existing_keys[
-                        key
-                    ]
-                )
-            # ---------------------------------------------------------
-                    # STORE DEFINITIVE SCOPUS IDENTIFIERS
-                    # ---------------------------------------------------------
-
-                eid = str(
-                        entry.get("eid") or ""
-                    ).strip()
-
-                if eid:
-                        existing_df.at[
-                            index,
-                            "Scopus EID"
-                        ] = eid
-
-
-                scopus_document_id = str(
-                        entry.get(
-                            "dc:identifier"
-                        ) or ""
-                    ).strip()
-
-
-                scopus_document_id = (
-                        scopus_document_id
-                        .replace(
-                            "SCOPUS_ID:",
-                            ""
-                        )
-                        .strip()
-                    )
-
-
-                if scopus_document_id:
-
-                        existing_df.at[
-                            index,
-                            "Scopus Document ID"
-                        ] = scopus_document_id
-
-                citation_column = (
-                    mapping.get(
-                        "cited_by"
-                    )
-                )
-
-
-                if (
-                    citation_column
-                    and
-                    citation_column
-                    in existing_df.columns
-                ):
-
-                    try:
-
-                        citations = int(
-                            entry.get(
-                                "citedby-count"
-                            )
-                            or 0
-                        )
-
-                    except Exception:
-
-                        citations = 0
-
-
-                    existing_df.at[
-                        index,
-                        citation_column
-                    ] = citations
-
-
-                # Update DOI if missing / newer
-                doi_column = (
-                    mapping.get(
-                        "doi"
-                    )
-                )
-
-
-                if (
-                    doi_column
-                    and
-                    doi_column
-                    in existing_df.columns
-                ):
-
-                    doi = str(
-                        entry.get(
-                            "prism:doi"
-                        )
-                        or ""
-                    ).strip()
-
-
-                    if doi:
-
-                        existing_df.at[
-                            index,
-                            doi_column
-                        ] = doi
-
-
-                updated_publications += 1
-
-
-                SCOPUS_SYNC_PROGRESS[
-                    "updated_publications"
-                ] = updated_publications
-
-
-                continue
-
-
-            # =============================================
-            # NEW DOCUMENT
-            # =============================================
-
-            try:
-
-                eid = str(
-                    entry.get(
-                        "eid"
-                    )
-                    or ""
-                ).strip()
-
-
-                abstract_data = (
-                    _abstract_metadata(
-                        eid
-                    )
-                )
-
-
-                (
-                    all_authors,
-                    institutional_authors
-                ) = (
-                    _authors_from_abstract(
-                        abstract_data
-                    )
-                )
-
-
-                # Search response fallback
-                if not all_authors:
-
-                    names, ids = (
-                        _scopus_entry_authors(
-                            entry
-                        )
-                    )
-
-
-                    all_authors = []
-
-
-                    for i, name in enumerate(
-                        names
-                    ):
-
-                        author_id = (
-                            ids[i]
-                            if i < len(ids)
-                            else ""
-                        )
-
-
-                        all_authors.append({
-                            "name":
-                                name,
-
-                            "author_id":
-                                author_id
-                        })
-
-                if "Scopus EID" not in columns:
-                    columns.append("Scopus EID")
-
-                if "Scopus Document ID" not in columns:
-                    columns.append(
-                         "Scopus Document ID"
-                    )
-                    
-                new_row = (
-                    _build_new_master_row(
-                        entry,
-                        mapping,
-                        columns,
-                        all_authors,
-                        institutional_authors
-                    )
-                )
-
-
-                new_rows.append(
-                    new_row
-                )
-
-
-                # =========================================
-                # NEW DSATM AUTHORS
-                # =========================================
-
-                for author in (
-                    institutional_authors
-                ):
-
-                    author_id = (
-                        _clean_scopus_id(
-                            author.get(
-                                "author_id"
-                            )
-                        )
-                    )
-
-
-                    author_name = str(
-                        author.get(
-                            "name"
-                        )
-                        or ""
-                    ).strip()
-
-
-                    if (
-                        not author_id
-                        or
-                        not author_name
-                    ):
-                        continue
-
-
-                    if (
-                        author_id
-                        not in known_author_ids
-                    ):
-
-                        new_authors[
-                            author_id
-                        ] = {
-                            "Faculty Name":
-                                author_name,
-
-                            "Scopus Author ID":
-                                author_id,
-
-                            "Institution":
-                                DSATM_INSTITUTION_NAME,
-
-                            "Scopus Affiliation ID":
-                                DSATM_SCOPUS_AFFILIATION_ID,
-
-                            "Detected From":
-                                title
-                        }
-
-
-                        known_author_ids.add(
-                            author_id
-                        )
-
-
-                SCOPUS_SYNC_PROGRESS[
-                    "new_publications"
-                ] = len(
-                    new_rows
-                )
-
-
-                SCOPUS_SYNC_PROGRESS[
-                    "new_authors"
-                ] = len(
-                    new_authors
-                )
-
-
-            except Exception as exc:
-
-                issues.append({
-                    "Document":
-                        title,
-
-                    "EID":
-                        str(
-                            entry.get(
-                                "eid"
-                            )
-                            or ""
-                        ),
-
-                    "Status":
-                        str(exc)[:500]
-                })
-
-
-                SCOPUS_SYNC_PROGRESS[
-                    "issues"
-                ] = len(
-                    issues
-                )
-
-
-        # =================================================
-        # ADD NEW PUBLICATIONS
-        # =================================================
-
-        if new_rows:
-
-            new_df = pd.DataFrame(
-                new_rows,
-                columns=columns
-            )
-
-
-            master_df = pd.concat(
-                [
-                    existing_df,
-                    new_df
-                ],
-                ignore_index=True
-            )
-
-        else:
-
-            master_df = (
-                existing_df.copy()
-            )
-
-        # =================================================
-        # FINAL DEDUPLICATION
-        # Scopus EID / Scopus ID are authoritative
-        # =================================================
-        seen = set()
-        keep_indexes = []
-
-        for index, row in master_df.iterrows():
-
-            key = _document_key_from_excel_row(
-                row,
-                mapping
-            )
-
-            # Keep only one row for the same
-            # definitive document identifier.
-            if key in seen:
-                continue
-
-            seen.add(key)
-            keep_indexes.append(index)
-
-        master_df = (
-            master_df
-            .loc[keep_indexes]
-            .reset_index(drop=True)
-        )
-
-        # =================================================
-        # SAVE MASTER EXCEL PERMANENTLY
-        # =================================================
-
-        SCOPUS_SYNC_PROGRESS.update({
-            "stage": "saving",
-            "percent": 99,
-            "message":
-                "Saving synchronized master workbook..."
-        })
-        # =================================================
-        # SAVE MASTER EXCEL PERMANENTLY
-        # =================================================
-
-        SCOPUS_SYNC_PROGRESS.update({
-            "stage":
-                "saving",
-
-            "percent":
-                99,
-
-            "message":
-                "Saving synchronized master workbook..."
-        })
-
-
-        sync_summary = pd.DataFrame([
-            {
-                "Institution":
-                    DSATM_INSTITUTION_NAME,
-
-                "Scopus Affiliation ID":
-                    DSATM_SCOPUS_AFFILIATION_ID,
-
-                "Existing Excel Publications":
-                    existing_count,
-
-                "Current Scopus Publications":
-                    scopus_total,
-
-                "New Publications Added":
-                    len(new_rows),
-
-                "Existing Publications Updated":
-                    updated_publications,
-
-                "New DSATM Authors Detected":
-                    len(new_authors),
-
-                "Final Master Publications":
-                    len(master_df),
-
-                "Issues":
-                    len(issues),
-
-                "Synced At":
-                    datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-            }
-        ])
-
-
-        temp_master_file = (
-            BASE_DIR / "DSATM Scopus Master_temp.xlsx"
-        )
-
-        with pd.ExcelWriter(
-            temp_master_file,
-            engine="openpyxl"
-        ) as writer:
-
-            master_df.to_excel(
-                writer,
-                index=False,
-                sheet_name=
-                    "Scopus Master Export"
-            )
-
-
-            sync_summary.to_excel(
-                writer,
-                index=False,
-                sheet_name=
-                    "Institution Sync Summary"
-            )
-
-
-            if new_authors:
-
-                pd.DataFrame(
-                    list(
-                        new_authors.values()
-                    )
-                ).to_excel(
-                    writer,
-                    index=False,
-                    sheet_name=
-                        "New Institution Authors"
-                )
-
-
-            if issues:
-
-                pd.DataFrame(
-                    issues
-                ).to_excel(
-                    writer,
-                    index=False,
-                    sheet_name=
-                        "Sync Issues"
-                )
-
-
-            # =============================================
-            # SIMPLE FORMATTING
-            # =============================================
-
-            for ws in (
-                writer.book.worksheets
-            ):
-
-                ws.freeze_panes = "A2"
-
-                ws.auto_filter.ref = (
-                    ws.dimensions
-                )
-
-
-                for cell in ws[1]:
-
-                    cell.font = (
-                        cell.font.copy(
-                            bold=True
-                        )
-                    )
-
-
-                for column_cells in (
-                    ws.columns
-                ):
-
-                    letter = (
-                        column_cells[0]
-                        .column_letter
-                    )
-
-
-                    max_len = 0
-
-
-                    for cell in (
-                        column_cells[:200]
-                    ):
-
-                        value = (
-                            ""
-                            if cell.value is None
-                            else str(
-                                cell.value
-                            )
-                        )
-
-
-                        max_len = max(
-                            max_len,
-                            len(value)
-                        )
-
-
-                    ws.column_dimensions[
-                        letter
-                    ].width = min(
-                        max(
-                            max_len + 2,
-                            10
-                        ),
-                        45
-                    )
-        # =================================================
-        # REPLACE OLD MASTER ONLY AFTER SUCCESSFUL WRITE
-        # =================================================
-
-        temp_master_file.replace(
-            MASTER_EXCEL_FILE
-        )
-
-        print(
-            "Master Excel saved successfully:",
-            MASTER_EXCEL_FILE
-        )
-
-        # =================================================
-        # RELOAD APPLICATION STATE
-        # =================================================
-
-        state_df = (
-            master_df.copy()
-        )
-
-
-        state_df[
-            "_sheet"
-        ] = "Scopus Master Export"
-
-
-        refreshed_mapping = (
-            infer_mapping(
-                state_df.columns
-            )
-        )
-
-
-        faculty = extract_faculty(
-            state_df,
-            refreshed_mapping,
-            DSATM_INSTITUTION_NAME
-        )
-
-
-        refreshed_meta = [
-
-            faculty_metadata(
-                state_df,
-                refreshed_mapping,
-                faculty_name,
-                DSATM_INSTITUTION_NAME
-            )
-
-            for faculty_name
-            in faculty
-        ]
-
-
-        departments = sorted({
-            item["department"]
-            for item in refreshed_meta
-        })
-
-
-        overall = institution_overall(
-            state_df,
-            refreshed_mapping,
-            refreshed_meta
-        )
-
-
-        faculty_meta_cache = (
-            refreshed_meta
-        )
-
-
-        STATE.update({
-            "df":
-                state_df,
-
-            "filename":
-                MASTER_EXCEL_FILE.name,
-
-            "institution_keyword":
-                DSATM_INSTITUTION_NAME,
-
-            "mapping":
-                refreshed_mapping,
-
-            "faculty_meta":
-                refreshed_meta,
-
-            "departments":
-                departments,
-
-            "overall":
-                overall
-        })
-
-
-        # =================================================
-        # DONE
-        # =================================================
-
-        SCOPUS_SYNC_PROGRESS.update({
-            "running":
-                False,
-
-            "stage":
-                "completed",
-
-            "current":
-                total_to_process,
-
-            "total":
-                total_to_process,
-
-            "percent":
-                100,
-
-            "new_publications":
-                len(new_rows),
-
-            "updated_publications":
-                updated_publications,
-
-            "new_authors":
-                len(new_authors),
-
-            "issues":
-                len(issues),
-
-            "message":
-                "Institution Scopus synchronization completed."
-        })
-
-
-        # =================================================
-        # DOWNLOAD UPDATED MASTER
-        # =================================================
-
-        file_bytes = (
-            MASTER_EXCEL_FILE
-            .read_bytes()
-        )
-
-
-        output = io.BytesIO(
-            file_bytes
-        )
-
-
-        output.seek(0)
-
-
-        headers = {
-            "Content-Disposition":
-                'attachment; '
-                'filename="'
-                'DSATM_Scopus_Master_Updated.xlsx'
-                '"',
-
-            "X-Scopus-Existing":
-                str(existing_count),
-
-            "X-Scopus-Total":
-                str(scopus_total),
-
-            "X-Scopus-New-Publications":
-                str(len(new_rows)),
-
-            "X-Scopus-New-Authors":
-                str(len(new_authors)),
-
-            "X-Scopus-Updated":
-                str(updated_publications),
-
-            "X-Scopus-Issues":
-                str(len(issues))
-        }
-
-
-        return StreamingResponse(
-            output,
-
-            media_type=(
-                "application/vnd.openxmlformats-"
-                "officedocument.spreadsheetml.sheet"
-            ),
-
-            headers=headers
-        )
-
-
-    except HTTPException:
-
-        SCOPUS_SYNC_PROGRESS[
-            "running"
-        ] = False
-
-        SCOPUS_SYNC_PROGRESS[
-            "stage"
-        ] = "error"
-
-        raise
-
-
-    except Exception as exc:
-
-        SCOPUS_SYNC_PROGRESS.update({
-            "running":
-                False,
-
-            "stage":
-                "error",
-
-            "message":
-                str(exc)
-        })
-
-
-        raise HTTPException(
-            500,
-            f"Institution synchronization failed: {exc}"
-        )
+def refresh_excel_from_scopus(max_records_per_author: int = 500):
     """Build an updated Excel workbook using live Scopus data for all detected faculty.
 
     Workflow:
@@ -3512,17 +2826,30 @@ def refresh_excel_from_scopus():
                 ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 45)
 
     output.seek(0)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    headers = {
-        "Content-Disposition": f'attachment; filename="DSATM_Scopus_Live_Updated_{stamp}.xlsx"',
-        "X-Scopus-Updated-Faculty": str(len(metrics_rows)),
-        "X-Scopus-Refresh-Issues": str(len(failures)),
-    }
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers,
+    excel_bytes = output.getvalue()
+
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    github_result = commit_excel_bytes_to_github(
+        excel_bytes,
+        commit_message=(
+            f"Auto-update DSATM Scopus master - {stamp}"
+        ),
     )
+
+    return {
+        "success": True,
+        "message": "Live Scopus refresh completed and master Excel committed to GitHub.",
+        "updated_faculty": len(metrics_rows),
+        "live_publications": len(publication_rows),
+        "issues": len(failures),
+        "updated_at": stamp,
+        "github": github_result,
+        "vercel_note": (
+            "If this GitHub repository is connected to the Vercel project, "
+            "the commit will trigger a new deployment automatically."
+        ),
+    }
 
 
 @app.get("/api/scopus/export/{author_id}")
@@ -3550,270 +2877,3 @@ def export_faculty(faculty: str):
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", faculty).strip("_") or "faculty"
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}_scopus_publications.xlsx"'}
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
-
-
-# =========================================================
-# AUTO LOAD DEFAULT DSATM SCOPUS EXCEL
-# =========================================================
-
-ORIGINAL_EXCEL_FILE = (
-    BASE_DIR / "DSATM Scopus.xls"
-)
-
-DEFAULT_EXCEL_FILE = (
-    MASTER_EXCEL_FILE
-    if MASTER_EXCEL_FILE.exists()
-    else ORIGINAL_EXCEL_FILE
-)
-
-
-def load_default_scopus_excel():
-
-    global faculty_meta_cache
-
-    print("\n============================================")
-    print("AUTO LOADING DSATM SCOPUS FACULTY DIRECTORY")
-    print("============================================")
-
-    # -----------------------------------------------------
-    # CHECK FILE
-    # -----------------------------------------------------
-
-    if not DEFAULT_EXCEL_FILE.exists():
-
-        print(
-            "Default Excel file not found:",
-            DEFAULT_EXCEL_FILE
-        )
-
-        return False
-
-
-    try:
-
-        # -------------------------------------------------
-        # READ FILE
-        # -------------------------------------------------
-
-        content = DEFAULT_EXCEL_FILE.read_bytes()
-
-
-        df = read_excel_bytes(
-            content,
-            DEFAULT_EXCEL_FILE.name
-        )
-
-
-        # -------------------------------------------------
-        # DETECT COLUMNS
-        # -------------------------------------------------
-
-        mapping = infer_mapping(
-            df.columns
-            )
-
-
-        if not mapping.get("title"):
-
-            print(
-                "Unable to detect Title column."
-            )
-
-            return False
-
-
-        if not (
-            mapping.get("authors")
-            or
-            mapping.get(
-                "authors_affiliations"
-            )
-        ):
-
-            print(
-                "Unable to detect author columns."
-            )
-
-            return False
-
-
-        # -------------------------------------------------
-        # INSTITUTION
-        # -------------------------------------------------
-
-        institution_keyword = (
-            "Dayananda Sagar Academy "
-            "of Technology and Management"
-        )
-
-
-        # -------------------------------------------------
-        # EXTRACT FACULTY
-        # -------------------------------------------------
-
-        faculty = extract_faculty(
-                df,
-                mapping,
-                institution_keyword
-            )
-
-
-        # -------------------------------------------------
-        # BUILD FACULTY METADATA
-        # -------------------------------------------------
-
-        meta = [
-
-            faculty_metadata(
-                df,
-                mapping,
-                faculty_name,
-                institution_keyword
-            )
-
-            for faculty_name
-            in faculty
-        ]
-
-
-        # -------------------------------------------------
-        # UPDATE GLOBAL CACHE
-        # -------------------------------------------------
-
-        faculty_meta_cache = meta
-
-
-        # -------------------------------------------------
-        # DEPARTMENTS
-        # -------------------------------------------------
-
-        departments =sorted({
-
-                item["department"]
-
-                for item
-                in meta
-            })
-
-
-        # -------------------------------------------------
-        # INSTITUTION SUMMARY
-        # -------------------------------------------------
-
-        overall = institution_overall(
-                df,
-                mapping,
-                meta
-            )
-
-
-        # -------------------------------------------------
-        # UPDATE APPLICATION STATE
-        # -------------------------------------------------
-
-        STATE.update({
-
-            "df":
-                df,
-
-            "filename":
-                DEFAULT_EXCEL_FILE.name,
-
-            "institution_keyword":
-                institution_keyword,
-
-            "mapping":
-                mapping,
-
-            "faculty_meta":
-                meta,
-
-            "departments":
-                departments,
-
-            "overall":
-                overall
-        })
-
-
-        # -------------------------------------------------
-        # SUCCESS
-        # -------------------------------------------------
-
-        print(
-            f"Default Scopus Excel loaded successfully."
-        )
-
-        print(
-            f"Faculty detected: {len(meta)}"
-        )
-
-        print(
-            f"Departments detected: {len(departments)}"
-        )
-
-        print(
-            f"Records loaded: {len(df)}"
-        )
-
-
-        # Sample records
-        for item in meta[:5]:
-
-            print(
-                "Faculty:",
-                item.get("faculty"),
-                "| Scopus ID:",
-                item.get(
-                    "scopus_author_id"
-                )
-            )
-
-
-        print("============================================\n")
-
-
-        return True
-
-
-    except Exception as exc:
-
-        print(
-            "ERROR AUTO LOADING EXCEL:",
-            str(exc)
-        )
-
-        return False
-
-@app.on_event("startup")
-def startup_load_faculty_directory():
-    load_default_scopus_excel() 
-# =========================================================
-# BOOTSTRAP AUTO-LOADED FACULTY DIRECTORY
-# =========================================================
-
-@app.get("/api/bootstrap")
-def bootstrap():
-
-    loaded = STATE.get("df") is not None
-
-    if not loaded:
-        return {
-            "loaded": False,
-            "faculty_meta": [],
-            "departments": [],
-            "overall": {}
-        }
-
-    return {
-        "loaded": True,
-        "filename": STATE.get("filename"),
-        "faculty_meta": STATE.get("faculty_meta", []),
-        "faculty_count": len(
-            STATE.get("faculty_meta", [])
-        ),
-        "departments": STATE.get("departments", []),
-        "overall": STATE.get("overall", {})
-    }
-
-     
