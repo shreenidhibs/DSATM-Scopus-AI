@@ -729,8 +729,30 @@ $('uploadBtn').addEventListener(
 
 
 /* ==========================================================
-   REFRESH UPLOADED EXCEL WITH LIVE SCOPUS DATA
+   REFRESH MASTER EXCEL WITH LIVE SCOPUS DATA
+   Manual upload is optional; backend can use bundled master.
 ========================================================== */
+
+async function initializeRefreshButton() {
+  const btn = $('refreshScopusExcelBtn');
+  if (!btn) return;
+  btn.disabled = false;
+  try {
+    const r = await fetch('/api/scopus/refresh-source-status');
+    if (r.ok) {
+      const d = await r.json();
+      btn.disabled = !d.refresh_available;
+      if (!d.refresh_available) {
+        btn.title = 'No DSATM master Scopus workbook is available.';
+      }
+    }
+  } catch (_) {
+    // Keep enabled so the backend can return a useful error message.
+    btn.disabled = false;
+  }
+}
+
+initializeRefreshButton();
 
 if ($('refreshScopusExcelBtn')) {
   $('refreshScopusExcelBtn').addEventListener('click', async () => {

@@ -2706,6 +2706,70 @@ def github_update_status():
     }
 
 
+def _load_master_dataset_for_refresh() -> None:
+    """Load the bundled institutional Scopus export when no manual upload exists."""
+    global faculty_meta_cache
+
+    if STATE.get("df") is not None and STATE.get("faculty_meta"):
+        return
+
+    candidates = [
+        BASE_DIR / "DSATM Scopus.xls",
+        BASE_DIR / "DSATM Scopus.xlsx",
+        BASE_DIR / "DSATM Scopus Master.xlsx",
+    ]
+    master = next((x for x in candidates if x.exists()), None)
+    if master is None:
+        raise HTTPException(
+            400,
+            "No bundled DSATM master Scopus Excel file was found. "
+            "Add DSATM Scopus.xls/.xlsx to the project or upload a file first."
+        )
+
+    df = read_excel_bytes(master.read_bytes(), master.name)
+    mapping = infer_mapping(df.columns)
+    if not mapping.get("title") or not (
+        mapping.get("authors") or mapping.get("authors_affiliations")
+    ):
+        raise HTTPException(
+            400,
+            f"{master.name} does not contain the required Scopus Title and Authors columns."
+        )
+
+    institution_keyword = STATE.get("institution_keyword") or DSATM_INSTITUTION_NAME
+    faculty = extract_faculty(df, mapping, institution_keyword)
+    meta = [faculty_metadata(df, mapping, f, institution_keyword) for f in faculty]
+    if not meta:
+        raise HTTPException(400, f"No faculty records could be detected in {master.name}.")
+
+    faculty_meta_cache = meta
+    departments = sorted({m.get("department", "") for m in meta if m.get("department")})
+    overall = institution_overall(df, mapping, meta)
+    STATE.update({
+        "df": df,
+        "filename": master.name,
+        "institution_keyword": institution_keyword,
+        "mapping": mapping,
+        "faculty_meta": meta,
+        "departments": departments,
+        "overall": overall,
+    })
+
+
+@app.get("/api/scopus/refresh-source-status")
+def refresh_source_status():
+    """Tell the GUI whether automatic refresh has a bundled source workbook."""
+    bundled = any((BASE_DIR / n).exists() for n in (
+        "DSATM Scopus.xls", "DSATM Scopus.xlsx", "DSATM Scopus Master.xlsx"
+    ))
+    return {
+        "success": True,
+        "manual_dataset_loaded": STATE.get("df") is not None,
+        "bundled_master_available": bundled,
+        "refresh_available": bool(STATE.get("df") is not None or bundled),
+    }
+
+
 @app.get("/api/scopus/refresh-excel")
 def refresh_excel_from_scopus(max_records_per_author: int = 500):
     """Build an updated Excel workbook using live Scopus data for all detected faculty.
@@ -2718,8 +2782,9 @@ def refresh_excel_from_scopus(max_records_per_author: int = 500):
 
     The original uploaded dataset is not overwritten on the server.
     """
-    if STATE.get("df") is None:
-        raise HTTPException(400, "Upload and analyze the institutional Excel file first.")
+    # No manual upload is required. On a fresh Vercel instance, hydrate the
+    # application state from the bundled institutional Scopus workbook.
+    _load_master_dataset_for_refresh()
 
     faculty_rows = list(STATE.get("faculty_meta") or [])
     if not faculty_rows:
