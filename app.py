@@ -2756,6 +2756,41 @@ def _load_master_dataset_for_refresh() -> None:
     })
 
 
+@app.post("/api/scopus/trigger-refresh")
+def trigger_scopus_github_action():
+    """Trigger the long-running Scopus refresh in GitHub Actions."""
+    cfg = _github_settings()
+    workflow = os.getenv("GITHUB_REFRESH_WORKFLOW", "refresh-scopus.yml").strip()
+    url = (
+        f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}"
+        f"/actions/workflows/{quote(workflow, safe='')}/dispatches"
+    )
+    response = requests.post(
+        url,
+        headers=_github_headers(),
+        json={"ref": cfg["branch"]},
+        timeout=30,
+    )
+    if response.status_code != 204:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text[:1200]
+        raise HTTPException(
+            502,
+            f"Unable to start GitHub Scopus refresh ({response.status_code}): {detail}"
+        )
+    return {
+        "success": True,
+        "message": "Scopus refresh started successfully in GitHub Actions.",
+        "repository": f"{cfg['owner']}/{cfg['repo']}",
+        "branch": cfg["branch"],
+        "workflow": workflow,
+        "actions_url": f"https://github.com/{cfg['owner']}/{cfg['repo']}/actions",
+        "note": "GitHub Actions will update the master Excel and push it to the repository when the refresh finishes.",
+    }
+
+
 @app.get("/api/scopus/refresh-source-status")
 def refresh_source_status():
     """Tell the GUI whether automatic refresh has a bundled source workbook."""

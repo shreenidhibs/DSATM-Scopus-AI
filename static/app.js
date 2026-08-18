@@ -729,27 +729,16 @@ $('uploadBtn').addEventListener(
 
 
 /* ==========================================================
-   REFRESH MASTER EXCEL WITH LIVE SCOPUS DATA
-   Manual upload is optional; backend can use bundled master.
+   REFRESH MASTER EXCEL THROUGH GITHUB ACTIONS
 ========================================================== */
 
 async function initializeRefreshButton() {
   const btn = $('refreshScopusExcelBtn');
   if (!btn) return;
+  // Refresh no longer depends on a manual upload. GitHub Actions owns the
+  // long-running Scopus synchronization job.
   btn.disabled = false;
-  try {
-    const r = await fetch('/api/scopus/refresh-source-status');
-    if (r.ok) {
-      const d = await r.json();
-      btn.disabled = !d.refresh_available;
-      if (!d.refresh_available) {
-        btn.title = 'No DSATM master Scopus workbook is available.';
-      }
-    }
-  } catch (_) {
-    // Keep enabled so the backend can return a useful error message.
-    btn.disabled = false;
-  }
+  btn.title = 'Start DSATM Scopus refresh in GitHub Actions';
 }
 
 initializeRefreshButton();
@@ -758,42 +747,29 @@ if ($('refreshScopusExcelBtn')) {
   $('refreshScopusExcelBtn').addEventListener('click', async () => {
     const btn = $('refreshScopusExcelBtn');
     btn.disabled = true;
-    btn.innerHTML = '<span>Refreshing faculty from Scopus…</span><b>•••</b>';
+    btn.innerHTML = '<span>Starting GitHub refresh…</span><b>•••</b>';
 
+    $('uploadStatus').classList.remove('loaded');
     $('uploadStatus').innerHTML =
-      '<i></i><span>Retrieving current publications, citations and h-index values from Scopus…</span>';
+      '<i></i><span>Starting the DSATM Scopus refresh in GitHub Actions…</span>';
 
     try {
-      const r = await fetch('/api/scopus/refresh-excel?max_records_per_author=500');
+      const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
+      let d = {};
+      try { d = await r.json(); } catch (_) {}
 
       if (!r.ok) {
-        let message = 'Unable to refresh Excel from Scopus.';
-        try {
-          const d = await r.json();
-          message = d.detail || d.error || message;
-        } catch (_) {}
-        throw new Error(message);
+        throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
       }
-
-      const d = await r.json();
-
-      const updated = d.updated_faculty ?? 0;
-      const publications = d.live_publications ?? 0;
-      const issues = d.issues ?? 0;
-      const gh = d.github || {};
-      const commitShort = gh.commit_sha ? gh.commit_sha.slice(0, 7) : '';
 
       $('uploadStatus').classList.add('loaded');
       $('uploadStatus').innerHTML =
-        `<i></i><span><strong>Live Scopus master updated</strong><br>` +
-        `${esc(updated)} faculty updated · ${esc(publications)} live publication record(s) · ` +
-        `${esc(issues)} issue(s).<br>` +
-        `GitHub: ${esc(gh.repository || '')} / ${esc(gh.path || '')}` +
-        `${commitShort ? ' · commit ' + esc(commitShort) : ''}` +
-        `<br>Vercel redeployment will start automatically when GitHub deployment is connected.</span>`;
+        `<i></i><span><strong>Scopus refresh started successfully ✓</strong><br>` +
+        `GitHub Actions is updating the DSATM master dataset.<br>` +
+        `Repository: ${esc(d.repository || '')} · Branch: ${esc(d.branch || '')}<br>` +
+        `When the workflow finishes, it will commit the updated Excel and Vercel can redeploy automatically.</span>`;
 
-      toast('Master Excel updated in GitHub successfully.');
-
+      toast('Scopus refresh started in GitHub Actions.');
     } catch (e) {
       $('uploadStatus').classList.remove('loaded');
       $('uploadStatus').innerHTML = `<i></i><span>${esc(e.message)}</span>`;
