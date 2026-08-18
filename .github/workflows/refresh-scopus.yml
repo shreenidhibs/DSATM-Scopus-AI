@@ -1,0 +1,46 @@
+name: Refresh DSATM Scopus Master
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-scopus:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Refresh Scopus master data
+        env:
+          ELS_API_KEY: ${{ secrets.ELS_API_KEY }}
+          ELS_INST_TOKEN: ${{ secrets.ELS_INST_TOKEN }}
+        run: |
+          python scripts/refresh_scopus_master.py
+
+      - name: Commit updated Excel
+        run: |
+          git config user.name "DSATM Scopus Bot"
+          git config user.email "actions@github.com"
+
+          git add "DSATM Scopus Master.xlsx"
+
+          if git diff --cached --quiet; then
+            echo "No changes detected"
+          else
+            git commit -m "Auto-update DSATM Scopus master"
+            git push
+          fi
