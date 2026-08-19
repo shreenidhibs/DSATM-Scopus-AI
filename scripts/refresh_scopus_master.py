@@ -166,21 +166,28 @@ def get_all_institution_entries() -> tuple[list[dict[str, Any]], int]:
 
 
 def apply_entry(df: pd.DataFrame, index: int, entry: dict[str, Any]) -> None:
-    cover_date = clean(entry.get("prism:coverDate"))
+    cover_date = clean(
+    entry.get("prism:coverDate")
+    )
+
+    # ---------------------------------------------
+    # Safe numeric conversion
+    # ---------------------------------------------
+
     values = {
-        "Title": clean(entry.get("dc:title")),
-        "Year": cover_date[:4],
-        "Source title": clean(entry.get("prism:publicationName")),
-        "Cited by": clean(entry.get("citedby-count")) or "0",
-        "DOI": clean(entry.get("prism:doi")),
-        "Link": scopus_link(entry),
-        "Affiliations": affiliation_text(entry),
-        "Document Type": clean(entry.get("subtypeDescription")) or clean(entry.get("subtype")),
-        "Source": clean(entry.get("prism:aggregationType")),
-        "EID": clean(entry.get("eid")),
-        "Scopus EID": clean(entry.get("eid")),
-        "Scopus Document ID": scopus_doc_id(entry),
-    }
+            "Title": clean(entry.get("dc:title")),
+            "Year": cover_date[:4],
+            "Source title": clean(entry.get("prism:publicationName")),
+            "Cited by": clean(entry.get("citedby-count")) or "0",
+            "DOI": clean(entry.get("prism:doi")),
+            "Link": scopus_link(entry),
+            "Affiliations": affiliation_text(entry),
+            "Document Type": clean(entry.get("subtypeDescription")) or clean(entry.get("subtype")),
+            "Source": clean(entry.get("prism:aggregationType")),
+            "EID": clean(entry.get("eid")),
+            "Scopus EID": clean(entry.get("eid")),
+            "Scopus Document ID": scopus_doc_id(entry),
+        }
 
     for col, value in values.items():
         if col not in df.columns:
@@ -196,15 +203,33 @@ def new_row(columns: list[str], entry: dict[str, Any]) -> dict[str, Any]:
     creator = clean(entry.get("dc:creator"))
     cover_date = clean(entry.get("prism:coverDate"))
     affiliations = affiliation_text(entry)
+    try:
+        year_value = (
+            int(cover_date[:4])
+            if cover_date[:4]
+            else ""
+        )
+    except (ValueError, TypeError):
+        year_value = ""
+
+    try:
+        citation_value = int(
+            clean(
+                entry.get("citedby-count")
+            )
+            or 0
+        )
+    except (ValueError, TypeError):
+        citation_value = 0
 
     row.update({
         "Authors": creator,
         "Author full names": creator,
         "Author(s) ID": "",
         "Title": clean(entry.get("dc:title")),
-        "Year": cover_date[:4],
+        "Year": year_value,
         "Source title": clean(entry.get("prism:publicationName")),
-        "Cited by": clean(entry.get("citedby-count")) or "0",
+       "Cited by": citation_value,
         "DOI": clean(entry.get("prism:doi")),
         "Link": scopus_link(entry),
         "Affiliations": affiliations,
@@ -226,8 +251,29 @@ def main() -> None:
         raise RuntimeError(f"Master workbook not found: {MASTER.name}")
 
     print(f"Loading {MASTER.name}", flush=True)
-    df = pd.read_excel(MASTER, sheet_name=0, engine="openpyxl")
-    df = df.fillna("")
+    df = pd.read_excel(
+    MASTER,
+    sheet_name=0,
+    engine="openpyxl"
+)
+
+    # =========================================================
+    # MAKE MASTER DATAFRAME SAFE FOR SCOPUS STRING/NUMERIC UPDATE
+    # =========================================================
+    #
+    # Scopus may return Year, citation counts and document IDs as
+    # strings. Existing Excel columns may have been inferred by
+    # pandas as int64. Converting the DataFrame to object prevents
+    # errors such as:
+    #
+    # TypeError: Invalid value '2027' for dtype 'int64'
+    #
+    df = df.astype("object")
+
+    df = df.where(
+        pd.notna(df),
+        ""
+    )
     existing_count = len(df)
     print(f"Existing master publications: {existing_count}", flush=True)
 
@@ -247,16 +293,50 @@ def main() -> None:
         existing_index = key_to_index.get(key)
 
         if existing_index is not None:
-            old_citations = clean(df.at[existing_index, "Cited by"]) if "Cited by" in df.columns else ""
+            old_citations = (
+                clean(df.at[existing_index, "Cited by"])
+                if "Cited by" in df.columns
+                else ""
+            )
+
             new_citations = clean(entry.get("citedby-count")) or "0"
-            apply_entry(df, existing_index, entry)
+
+            apply_entry(
+                df,
+                existing_index,
+                entry
+            )
+
             if old_citations != new_citations:
                 updated += 1
+
             continue
 
-        row = new_row(list(df.columns), entry)
+        row = new_row(
+            list(df.columns),
+            entry
+        )
+
         new_rows.append(row)
-        key_to_index[key] = len(df) + len(new_rows) - 1
+
+        key_to_index[key] = (
+            len(df)
+            + len(new_rows)
+            - 1
+        )
+
+    if new_rows:
+        df = pd.concat(
+            [
+                df,
+                pd.DataFrame(
+                    new_rows,
+                    columns=df.columns
+                )
+            ],
+            ignore_index=True
+        )
+        
 
     if new_rows:
         df = pd.concat([df, pd.DataFrame(new_rows, columns=df.columns)], ignore_index=True)
