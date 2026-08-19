@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import base64
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -2716,7 +2717,7 @@ def load_master_dataset() -> None:
     candidates = [
         BASE_DIR / "DSATM Scopus Master.xlsx",
         BASE_DIR / "DSATM Scopus.xlsx",
-        BASE_DIR / "DSATM Scopus.xls"
+        BASE_DIR / "DSATM Scopus.xls",
     ]
     master = next((x for x in candidates if x.exists()), None)
     if master is None:
@@ -2754,77 +2755,101 @@ def load_master_dataset() -> None:
         "departments": departments,
         "overall": overall,
     })
+
+
+
 # =========================================================
-# AUTO LOAD LATEST DSATM MASTER DATASET
+# MASTER DATASET STARTUP / VERSION HELPERS
 # =========================================================
+
+def _master_dataset_path() -> Path | None:
+    candidates = [
+        BASE_DIR / "DSATM Scopus Master.xlsx",
+        BASE_DIR / "DSATM Scopus.xlsx",
+        BASE_DIR / "DSATM Scopus.xls",
+    ]
+    return next((p for p in candidates if p.exists()), None)
+
+
+def _master_dataset_hash() -> str:
+    path = _master_dataset_path()
+    if path is None:
+        return ""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return ""
+
 
 try:
     load_master_dataset()
-
     print("\n============================================")
     print("DSATM MASTER DATASET AUTO LOADED")
     print("============================================")
     print("File:", STATE.get("filename"))
-    print(
-        "Faculty:",
-        len(STATE.get("faculty_meta") or [])
-    )
-    print(
-        "Records:",
-        len(STATE["df"])
-        if STATE.get("df") is not None
-        else 0
-    )
+    print("Faculty:", len(STATE.get("faculty_meta") or []))
+    print("Records:", len(STATE["df"]) if STATE.get("df") is not None else 0)
     print("============================================\n")
-
 except Exception as exc:
+    print("AUTO LOAD MASTER DATASET FAILED:", str(exc))
 
-    print(
-        "AUTO LOAD MASTER DATASET FAILED:",
-        str(exc)
-    )
 
 @app.get("/api/bootstrap")
 def api_bootstrap():
-
     df = STATE.get("df")
-
-    faculty_meta = list(
-        STATE.get("faculty_meta")
-        or faculty_meta_cache
-        or []
-    )
-
+    faculty_meta = list(STATE.get("faculty_meta") or faculty_meta_cache or [])
     return {
         "success": True,
         "loaded": df is not None,
         "filename": STATE.get("filename", ""),
-        "rows": (
-            len(df)
-            if df is not None
-            else 0
-        ),
+        "rows": len(df) if df is not None else 0,
         "faculty_count": len(faculty_meta),
         "faculty_meta": faculty_meta,
-        "departments": (
-            STATE.get("departments")
-            or []
-        ),
-        "institution_keyword": (
-            STATE.get("institution_keyword")
-            or DSATM_INSTITUTION_NAME
-        ),
-        "institution_ready": (
-            df is not None
-            and len(faculty_meta) > 0
-        )
+        "departments": STATE.get("departments") or [],
+        "institution_keyword": STATE.get("institution_keyword") or DSATM_INSTITUTION_NAME,
+        "institution_ready": bool(df is not None and faculty_meta),
+        "master_hash": _master_dataset_hash(),
+        "deployment_sha": os.getenv("VERCEL_GIT_COMMIT_SHA", "").strip(),
     }
+
+
+def _github_branch_sha() -> str:
+    cfg = _github_settings()
+    url = (
+        f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}"
+        f"/branches/{quote(cfg['branch'], safe='')}"
+    )
+    response = requests.get(url, headers=_github_headers(), timeout=30)
+    if not response.ok:
+        return ""
+    try:
+        return str((response.json().get("commit") or {}).get("sha") or "").strip()
+    except Exception:
+        return ""
+
+
+def _parse_github_time(value: str) -> datetime | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 @app.post("/api/scopus/trigger-refresh")
 def trigger_scopus_github_action():
     """Trigger the long-running Scopus refresh in GitHub Actions."""
     cfg = _github_settings()
     workflow = os.getenv("GITHUB_REFRESH_WORKFLOW", "refresh-scopus.yml").strip()
+    before_sha = _github_branch_sha()
+    master_hash_before = _master_dataset_hash()
+    triggered_at = datetime.now(timezone.utc).isoformat()
+
     url = (
         f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}"
         f"/actions/workflows/{quote(workflow, safe='')}/dispatches"
@@ -2844,6 +2869,7 @@ def trigger_scopus_github_action():
             502,
             f"Unable to start GitHub Scopus refresh ({response.status_code}): {detail}"
         )
+
     return {
         "success": True,
         "message": "Scopus refresh started successfully in GitHub Actions.",
@@ -2851,7 +2877,168 @@ def trigger_scopus_github_action():
         "branch": cfg["branch"],
         "workflow": workflow,
         "actions_url": f"https://github.com/{cfg['owner']}/{cfg['repo']}/actions",
-        "note": "GitHub Actions will update the master Excel and push it to the repository when the refresh finishes.",
+        "triggered_at": triggered_at,
+        "before_sha": before_sha,
+        "master_hash_before": master_hash_before,
+        "deployment_sha_before": os.getenv("VERCEL_GIT_COMMIT_SHA", "").strip(),
+    }
+
+
+@app.get("/api/scopus/refresh-status")
+def scopus_refresh_status(
+    triggered_at: str = "",
+    before_sha: str = "",
+    master_hash_before: str = "",
+):
+    """Track GitHub Action -> Excel commit -> Vercel deployment readiness."""
+    cfg = _github_settings()
+    workflow = os.getenv("GITHUB_REFRESH_WORKFLOW", "refresh-scopus.yml").strip()
+
+    runs_url = (
+        f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}"
+        f"/actions/workflows/{quote(workflow, safe='')}/runs"
+    )
+    runs_response = requests.get(
+        runs_url,
+        headers=_github_headers(),
+        params={
+            "branch": cfg["branch"],
+            "event": "workflow_dispatch",
+            "per_page": 10,
+        },
+        timeout=30,
+    )
+    if not runs_response.ok:
+        raise HTTPException(
+            502,
+            f"Unable to read GitHub refresh status ({runs_response.status_code})."
+        )
+
+    runs = list((runs_response.json() or {}).get("workflow_runs") or [])
+    started_dt = _parse_github_time(triggered_at)
+    selected = None
+
+    for run in runs:
+        created_dt = _parse_github_time(run.get("created_at"))
+        if started_dt and created_dt:
+            # GitHub may register the dispatched run a few seconds before/after
+            # the client receives the dispatch response.
+            if created_dt.timestamp() + 45 < started_dt.timestamp():
+                continue
+        selected = run
+        break
+
+    if selected is None:
+        return {
+            "success": True,
+            "stage": "queued",
+            "percent": 8,
+            "message": "GitHub accepted the request. Waiting for the Scopus refresh runner…",
+            "ready": False,
+        }
+
+    run_id = selected.get("id")
+    run_status = str(selected.get("status") or "")
+    conclusion = str(selected.get("conclusion") or "")
+
+    if run_status == "completed" and conclusion not in ("success", ""):
+        return {
+            "success": False,
+            "stage": "error",
+            "percent": 100,
+            "message": f"GitHub refresh failed: {conclusion}",
+            "ready": False,
+            "run_url": selected.get("html_url", ""),
+        }
+
+    # Inspect workflow steps so the GUI can distinguish Scopus retrieval from
+    # writing/committing the Excel workbook.
+    step_states = {}
+    if run_id:
+        jobs_url = (
+            f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}"
+            f"/actions/runs/{run_id}/jobs"
+        )
+        jobs_response = requests.get(jobs_url, headers=_github_headers(), timeout=30)
+        if jobs_response.ok:
+            jobs = list((jobs_response.json() or {}).get("jobs") or [])
+            for job in jobs:
+                for step in job.get("steps") or []:
+                    step_states[str(step.get("name") or "").strip().lower()] = {
+                        "status": str(step.get("status") or ""),
+                        "conclusion": str(step.get("conclusion") or ""),
+                    }
+
+    refresh_step = step_states.get("refresh scopus master data", {})
+    commit_step = step_states.get("commit updated excel", {})
+
+    if run_status != "completed":
+        if refresh_step.get("status") == "completed" or commit_step.get("status") == "in_progress":
+            return {
+                "success": True,
+                "stage": "updating_excel",
+                "percent": 62,
+                "message": "Scopus data retrieved. Updating the master Excel in GitHub…",
+                "ready": False,
+                "run_url": selected.get("html_url", ""),
+            }
+        return {
+            "success": True,
+            "stage": "updating_scopus",
+            "percent": 32,
+            "message": "Updating Scopus data in GitHub Actions…",
+            "ready": False,
+            "run_url": selected.get("html_url", ""),
+        }
+
+    branch_sha = _github_branch_sha()
+    local_hash = _master_dataset_hash()
+    deployed_sha = os.getenv("VERCEL_GIT_COMMIT_SHA", "").strip()
+    changed = bool(before_sha and branch_sha and branch_sha != before_sha)
+
+    # Successful workflow with no new Git diff: there is nothing to redeploy.
+    if not changed:
+        return {
+            "success": True,
+            "stage": "complete",
+            "percent": 100,
+            "message": "Refresh completed successfully. Scopus returned no new changes.",
+            "ready": True,
+            "no_changes": True,
+            "run_url": selected.get("html_url", ""),
+            "branch_sha": branch_sha,
+            "deployment_sha": deployed_sha,
+        }
+
+    deployment_ready = False
+    if branch_sha and deployed_sha and branch_sha == deployed_sha:
+        deployment_ready = True
+    if master_hash_before and local_hash and local_hash != master_hash_before:
+        deployment_ready = True
+
+    if deployment_ready:
+        return {
+            "success": True,
+            "stage": "complete",
+            "percent": 100,
+            "message": "Updated successfully. The latest DSATM master dataset is live.",
+            "ready": True,
+            "no_changes": False,
+            "run_url": selected.get("html_url", ""),
+            "branch_sha": branch_sha,
+            "deployment_sha": deployed_sha,
+            "master_hash": local_hash,
+        }
+
+    return {
+        "success": True,
+        "stage": "deploying",
+        "percent": 84,
+        "message": "Master Excel updated in GitHub. Deploying the latest dataset to Vercel…",
+        "ready": False,
+        "run_url": selected.get("html_url", ""),
+        "branch_sha": branch_sha,
+        "deployment_sha": deployed_sha,
     }
 
 

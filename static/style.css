@@ -2570,3 +2570,82 @@ td {
   font-size: 8px;
   font-weight: 650;
 }
+
+
+/* =========================================================
+   SCOPUS REFRESH PROGRESS
+   ========================================================= */
+.scopus-refresh-progress {
+  width: 100%;
+  padding: 9px 4px 3px;
+  text-align: left;
+}
+
+.scopus-refresh-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+  font-size: 9px;
+  color: #cbd8e8;
+}
+
+.scopus-refresh-title strong {
+  color: #7ee2ae;
+  font-size: 10px;
+}
+
+.scopus-refresh-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.scopus-refresh-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2881ef, #55d4a4);
+  transition: width .45s ease;
+}
+
+.scopus-refresh-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 9px;
+  font-size: 8px;
+}
+
+.scopus-refresh-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  color: #74849a;
+}
+
+.scopus-refresh-step.active {
+  color: #8ec5ff;
+  font-weight: 800;
+}
+
+.scopus-refresh-step.done {
+  color: #68dda3;
+  font-weight: 800;
+}
+
+.scopus-refresh-arrow {
+  color: #526177;
+}
+
+.scopus-refresh-message {
+  margin-top: 7px;
+  text-align: center;
+  color: #8da0b7;
+  font-size: 8px;
+  line-height: 1.4;
+}

@@ -38,108 +38,41 @@ const toast = msg => {
     3000
   );
 };
+
+
+
 /* ==========================================================
    AUTO LOAD MASTER DATASET
 ========================================================== */
 
 async function bootstrapMasterDataset() {
-
   try {
-
-    const r = await fetch(
-      '/api/bootstrap'
-    );
-
+    const r = await fetch(`/api/bootstrap?_=${Date.now()}`, { cache: 'no-store' });
     const d = await r.json();
 
     if (!r.ok || !d.loaded) {
-
-      console.log(
-        'Master dataset not loaded.'
-      );
-
-      return;
+      return false;
     }
 
+    facultyMeta = d.faculty_meta || [];
+    $('facultyMeta').textContent = `${d.faculty_count || facultyMeta.length} faculty available`;
 
-    facultyMeta =
-      d.faculty_meta || [];
+    if ($('institutionKeyword') && d.institution_keyword) {
+      $('institutionKeyword').value = d.institution_keyword;
+    }
 
-
-    $('facultyMeta').textContent =
-      `${d.faculty_count} faculty available`;
-
-
-    fillDepartments(
-      d.departments || []
-    );
-
-
+    fillDepartments(d.departments || []);
     applyFacultyFilters();
+    setMode('excel');
 
-
-    // Enable faculty directory controls
-    $('facultySearch').disabled =
-      false;
-
-    $('departmentFilter').disabled =
-      false;
-
-
-    if ($('searchBy')) {
-
-      $('searchBy').disabled =
-        false;
-    }
-
-
-    // Enable Faculty Dashboard
-    if ($('openDashboardBtn')) {
-
-      $('openDashboardBtn').disabled =
-        false;
-    }
-
-
-    // Enable Institution Summary
-    $('summaryBtn').disabled =
-      false;
-
-
-    if ($('sideSummaryBtn')) {
-
-      $('sideSummaryBtn').disabled =
-        false;
-    }
-
-
-    if ($('homeSummaryBtn')) {
-
-      $('homeSummaryBtn').disabled =
-        false;
-    }
-
-
-    // Refresh button
     if ($('refreshScopusExcelBtn')) {
-
-      $('refreshScopusExcelBtn')
-        .disabled = false;
+      $('refreshScopusExcelBtn').disabled = false;
     }
 
-
-    console.log(
-      `Auto loaded ${d.faculty_count} faculty from ${d.filename}`
-    );
-
-  }
-
-  catch (e) {
-
-    console.error(
-      'Bootstrap failed:',
-      e
-    );
+    return true;
+  } catch (e) {
+    console.error('Master bootstrap failed:', e);
+    return false;
   }
 }
 
@@ -838,10 +771,116 @@ $('uploadBtn').addEventListener(
 async function initializeRefreshButton() {
   const btn = $('refreshScopusExcelBtn');
   if (!btn) return;
-  // Refresh no longer depends on a manual upload. GitHub Actions owns the
-  // long-running Scopus synchronization job.
   btn.disabled = false;
-  btn.title = 'Start DSATM Scopus refresh in GitHub Actions';
+  btn.title = 'Refresh DSATM Scopus master dataset';
+}
+
+function refreshStageLabel(stage) {
+  const labels = {
+    queued: 'Starting',
+    updating_scopus: 'Updating Scopus',
+    updating_excel: 'Updating Excel',
+    deploying: 'Deploying',
+    complete: 'Updated successfully',
+    error: 'Refresh failed'
+  };
+  return labels[stage] || 'Updating';
+}
+
+function renderRefreshProgress(stage, percent, message) {
+  const steps = [
+    ['updating_scopus', 'Updating Scopus'],
+    ['updating_excel', 'Updating Excel'],
+    ['deploying', 'Deploying'],
+    ['complete', 'Updated successfully']
+  ];
+
+  const order = {
+    queued: 0,
+    updating_scopus: 1,
+    updating_excel: 2,
+    deploying: 3,
+    complete: 4,
+    error: -1
+  };
+
+  const current = order[stage] ?? 0;
+  const items = steps.map((item, index) => {
+    const done = stage === 'complete' || current > index + 1;
+    const active = current === index + 1;
+    const cls = done ? 'done' : (active ? 'active' : 'pending');
+    const icon = done ? '✓' : (active ? '●' : '○');
+    return `<span class="scopus-refresh-step ${cls}"><b>${icon}</b>${esc(item[1])}</span>`;
+  }).join('<span class="scopus-refresh-arrow">→</span>');
+
+  $('uploadStatus').classList.toggle('loaded', stage === 'complete');
+  $('uploadStatus').innerHTML = `
+    <div class="scopus-refresh-progress">
+      <div class="scopus-refresh-title">
+        <strong>${esc(refreshStageLabel(stage))}</strong>
+        <span>${Math.max(0, Math.min(100, Number(percent || 0)))}%</span>
+      </div>
+      <div class="scopus-refresh-track">
+        <div class="scopus-refresh-bar" style="width:${Math.max(0, Math.min(100, Number(percent || 0)))}%"></div>
+      </div>
+      <div class="scopus-refresh-steps">${items}</div>
+      <div class="scopus-refresh-message">${esc(message || '')}</div>
+    </div>`;
+}
+
+async function monitorScopusRefresh(trigger) {
+  const startedAt = trigger.triggered_at || '';
+  const beforeSha = trigger.before_sha || '';
+  const beforeHash = trigger.master_hash_before || '';
+  let transientErrors = 0;
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 4000));
+
+    const params = new URLSearchParams({
+      triggered_at: startedAt,
+      before_sha: beforeSha,
+      master_hash_before: beforeHash
+    });
+
+    try {
+      const r = await fetch(`/api/scopus/refresh-status?${params.toString()}&_=${Date.now()}`, {
+        cache: 'no-store'
+      });
+      const d = await r.json();
+
+      if (!r.ok) {
+        throw new Error(d.detail || d.error || 'Unable to read refresh status.');
+      }
+
+      transientErrors = 0;
+
+      if (d.stage === 'error' || d.success === false) {
+        renderRefreshProgress('error', 100, d.message || 'Scopus refresh failed.');
+        throw new Error(d.message || 'Scopus refresh failed.');
+      }
+
+      renderRefreshProgress(d.stage || 'updating_scopus', d.percent || 0, d.message || 'Refreshing…');
+
+      if (d.ready) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await bootstrapMasterDataset();
+        setMode('excel');
+        await loadSummary('');
+        toast(d.no_changes ? 'Refresh complete. No new Scopus changes.' : 'Latest Institution Summary loaded successfully.');
+        return d;
+      }
+    } catch (e) {
+      transientErrors += 1;
+      // A production deployment can briefly interrupt polling while Vercel
+      // switches traffic. Keep waiting through short network errors.
+      if (transientErrors >= 8) {
+        throw e;
+      }
+    }
+  }
+
+  throw new Error('Refresh is still running. Please check GitHub Actions and reload the page shortly.');
 }
 
 initializeRefreshButton();
@@ -850,33 +889,23 @@ if ($('refreshScopusExcelBtn')) {
   $('refreshScopusExcelBtn').addEventListener('click', async () => {
     const btn = $('refreshScopusExcelBtn');
     btn.disabled = true;
-    btn.innerHTML = '<span>Starting GitHub refresh…</span><b>•••</b>';
-
-    $('uploadStatus').classList.remove('loaded');
-    $('uploadStatus').innerHTML =
-      '<i></i><span>Starting the DSATM Scopus refresh in GitHub Actions…</span>';
+    btn.innerHTML = '<span>Refreshing Scopus…</span><b>•••</b>';
+    renderRefreshProgress('queued', 5, 'Starting the DSATM Scopus refresh in GitHub Actions…');
 
     try {
       const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
       let d = {};
-      try { d = await r.json(); } catch (_) { }
+      try { d = await r.json(); } catch (_) {}
 
       if (!r.ok) {
         throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
       }
 
-      $('uploadStatus').classList.add('loaded');
-      $('uploadStatus').innerHTML =
-        `<i></i><span><strong>Scopus refresh started successfully ✓</strong><br>` +
-        `GitHub Actions is updating the DSATM master dataset.<br>` +
-        `Repository: ${esc(d.repository || '')} · Branch: ${esc(d.branch || '')}<br>` +
-        `When the workflow finishes, it will commit the updated Excel and Vercel can redeploy automatically.</span>`;
-
-      toast('Scopus refresh started in GitHub Actions.');
+      toast('Scopus refresh started.');
+      await monitorScopusRefresh(d);
     } catch (e) {
-      $('uploadStatus').classList.remove('loaded');
-      $('uploadStatus').innerHTML = `<i></i><span>${esc(e.message)}</span>`;
-      toast(e.message);
+      renderRefreshProgress('error', 100, e.message || 'Unable to refresh Scopus.');
+      toast(e.message || 'Unable to refresh Scopus.');
     } finally {
       btn.disabled = false;
       btn.innerHTML = '<span>Refresh Excel from Live Scopus</span><b>↻</b>';
@@ -2780,7 +2809,7 @@ if ($('openDashboardBtn')) {
 
 
         toast(
-          'Faculty dataset is not available.'
+          'Search Live Scopus or upload an Excel dataset first.'
         );
       }
     );
@@ -2804,7 +2833,7 @@ if ($('homeSummaryBtn')) {
         ) {
 
           toast(
-            'Institution dataset is not available.'
+            'Upload an institutional Excel dataset first.'
           );
 
           return;
@@ -2834,7 +2863,7 @@ if ($('sideSummaryBtn')) {
         ) {
 
           toast(
-            'Institution dataset is not available.'
+            'Institution Summary is available for Excel Data mode.'
           );
 
           return;
@@ -2916,23 +2945,12 @@ if ($('changeDatasetBtn')) {
 
 
 /* ==========================================================
-   INITIAL MODE
-========================================================== */
-
-setMode('live');
-
-/* ==========================================================
    APPLICATION STARTUP
 ========================================================== */
 
-document.addEventListener(
-  'DOMContentLoaded',
-  async () => {
-
-    await bootstrapMasterDataset();
-    if (facultyMeta.length) {
-      setMode('excel');
-    }
-
+document.addEventListener('DOMContentLoaded', async () => {
+  const loaded = await bootstrapMasterDataset();
+  if (!loaded) {
+    setMode('live');
   }
-);
+});
