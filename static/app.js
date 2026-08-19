@@ -6,7 +6,7 @@ let selectedLiveAuthorId = '';
 let currentPublications = [];
 let summaryRows = [];
 let lastDashboard = null;
-let currentDataSource = 'live';
+let currentDataSource = 'excel';
 
 const esc = (s = '') =>
   String(s).replace(/[&<>'"]/g, c => ({
@@ -39,6 +39,42 @@ const toast = msg => {
   );
 };
 
+
+
+/* ==========================================================
+   AUTO LOAD MASTER DATASET
+========================================================== */
+
+async function bootstrapMasterDataset() {
+  try {
+    const r = await fetch(`/api/bootstrap?_=${Date.now()}`, { cache: 'no-store' });
+    const d = await r.json();
+
+    if (!r.ok || !d.loaded) {
+      return false;
+    }
+
+    facultyMeta = d.faculty_meta || [];
+    $('facultyMeta').textContent = `${d.faculty_count || facultyMeta.length} faculty available`;
+
+    if ($('institutionKeyword') && d.institution_keyword) {
+      $('institutionKeyword').value = d.institution_keyword;
+    }
+
+    fillDepartments(d.departments || []);
+    applyFacultyFilters();
+    setMode('excel');
+
+    if ($('refreshScopusExcelBtn')) {
+      $('refreshScopusExcelBtn').disabled = false;
+    }
+
+    return true;
+  } catch (e) {
+    console.error('Master bootstrap failed:', e);
+    return false;
+  }
+}
 
 /* ==========================================================
    DATA SOURCE MODE
@@ -94,6 +130,15 @@ function setMode(mode) {
   if ($('homeSummaryBtn')) {
     $('homeSummaryBtn').disabled =
       !summaryEnabled;
+  }
+
+  const dashboardEnabled =
+    mode === 'excel' &&
+    facultyMeta.length > 0;
+
+  if ($('openDashboardBtn')) {
+    $('openDashboardBtn').disabled =
+      !dashboardEnabled;
   }
 }
 
@@ -199,44 +244,195 @@ async function searchLiveScopus() {
   return loadLiveScopusAuthor(authorId);
 }
 
+function setAuthorDirectoryProgressVisible(visible) {
+  const box = $('authorDirectoryProgress');
+  if (!box) return;
+  box.classList.toggle('hidden', !visible);
+}
+
+function renderAuthorDirectoryProgress(p) {
+  setAuthorDirectoryProgressVisible(true);
+
+  const percent = Math.max(0, Math.min(100, Number(p.percent || 0)));
+  const current = Number(p.current || 0);
+  const total = Number(p.total || 0);
+  const authors = Number(p.authors_found || p.cached_authors || 0);
+
+  $('authorDirectoryProgressPercent').textContent = `${percent}%`;
+  $('authorDirectoryProgressBar').style.width = `${percent}%`;
+  $('authorDirectoryProgressMessage').textContent =
+    p.message || 'Building DSATM Author Directory...';
+
+  $('authorDirectoryProgressMeta').textContent =
+    `Publications: ${current} / ${total || '—'} • Authors found: ${authors}`;
+
+  if (p.stage === 'complete') {
+    $('authorDirectoryProgressTitle').textContent = 'DSATM Author Directory Ready';
+  } else if (p.stage === 'error') {
+    $('authorDirectoryProgressTitle').textContent = 'Author Directory Build Failed';
+  } else {
+    $('authorDirectoryProgressTitle').textContent = 'Building DSATM Author Directory...';
+  }
+}
+
+async function waitForAuthorDirectoryBuild() {
+  while (true) {
+    const r = await fetch('/api/scopus/author-directory-progress');
+    let p = {};
+
+    try {
+      p = await r.json();
+    } catch (_) {
+      throw new Error('Unable to read author-directory build progress.');
+    }
+
+    if (!r.ok) {
+      throw new Error(p.detail || p.error || 'Unable to read author-directory build progress.');
+    }
+
+    renderAuthorDirectoryProgress(p);
+
+    if (p.stage === 'error' || p.error) {
+      throw new Error(p.error || p.message || 'Unable to build DSATM Author Directory.');
+    }
+
+    if (p.directory_ready && !p.running) {
+      return p;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+}
+
+async function ensureAuthorDirectoryReady() {
+  const statusResponse = await fetch('/api/scopus/author-directory-status');
+
+  let status = {};
+
+  try {
+    status = await statusResponse.json();
+  } catch (_) {
+    throw new Error('Unable to check DSATM Author Directory.');
+  }
+
+  if (!statusResponse.ok) {
+    throw new Error(
+      status.detail ||
+      status.error ||
+      'Unable to check DSATM Author Directory.'
+    );
+  }
+
+  if (!status.directory_ready) {
+    throw new Error(
+      'DSATM_Author_Directory.xlsx is missing from the project root. ' +
+      'Copy the supplied author directory Excel beside app.py and restart the server.'
+    );
+  }
+
+  setAuthorDirectoryProgressVisible(false);
+
+  return status;
+}
+
 async function searchLiveScopusByName() {
   const name = $('liveAuthorName').value.trim().replace(/\s+/g, ' ');
+
   if (name.length < 2) {
     toast('Enter at least 2 characters of the faculty name.');
     return;
   }
+
   $('liveSearchBtn').disabled = true;
-  $('liveSearchBtn').innerHTML = '<span>Searching Scopus authors…</span><b>•••</b>';
+  $('liveSearchBtn').innerHTML =
+    '<span>Checking faculty directory…</span><b>•••</b>';
+
   $('liveStatus').classList.remove('loaded');
-  $('liveStatus').innerHTML = '<i></i><span>Finding matching Scopus author profiles…</span>';
   $('liveAuthorMatches').classList.add('hidden');
+  $('liveAuthorMatches').innerHTML = '';
+
   try {
-    const institution = $('institutionKeyword')?.value?.trim() || 'Dayananda Sagar Academy of Technology and Management';
-    const r = await fetch(`/api/scopus/author-search?name=${encodeURIComponent(name)}&institution=${encodeURIComponent(institution)}`);
-    const d = await r.json();
-    if (!r.ok || d.success === false) throw new Error(d.detail || d.error || 'Unable to search Scopus authors.');
+    await ensureAuthorDirectoryReady();
+
+    $('liveSearchBtn').innerHTML =
+      '<span>Searching faculty directory…</span><b>•••</b>';
+
+    $('liveStatus').innerHTML =
+      '<i></i><span>Searching DSATM Author Directory...</span>';
+
+    const institution =
+      $('institutionKeyword')?.value?.trim() ||
+      'Dayananda Sagar Academy of Technology and Management';
+
+    const r = await fetch(
+      `/api/scopus/author-search?name=${encodeURIComponent(name)}&institution=${encodeURIComponent(institution)}`
+    );
+
+    let d = {};
+
+    try {
+      d = await r.json();
+    } catch (_) {
+      throw new Error('The server returned an invalid response.');
+    }
+
+    if (!r.ok || d.success === false) {
+      throw new Error(
+        d.detail ||
+        d.error ||
+        'Unable to search DSATM Author Directory.'
+      );
+    }
+
     const candidates = d.candidates || [];
+
     if (!candidates.length) {
-      $('liveStatus').innerHTML = '<i></i><span>No matching Scopus author found. Try surname or use Scopus Author ID.</span>';
+      $('liveStatus').innerHTML =
+        '<i></i><span>No matching DSATM author found. Try another spelling or use Scopus Author ID.</span>';
       return;
     }
+
     $('liveAuthorMatches').innerHTML = candidates.map(c => `
-      <button type="button" class="live-author-card" data-author-id="${esc(c.author_id)}">
-        <span><strong>${esc(c.name)}${c.excel_match ? '<span class="excel-match-badge">Excel match</span>' : ''}</strong>
-        <small>${esc(c.affiliation || 'Affiliation not available')}${c.city ? ' · ' + esc(c.city) : ''}${c.country ? ' · ' + esc(c.country) : ''} · ${c.documents ?? 0} documents</small></span>
+      <button type="button"
+              class="live-author-card"
+              data-author-id="${esc(c.author_id)}">
+        <span>
+          <strong>
+            ${esc(c.name)}
+            ${c.excel_match ? '<span class="excel-match-badge">DSATM directory</span>' : ''}
+          </strong>
+          <small>
+            ${esc(c.affiliation || 'Dayananda Sagar Academy of Technology and Management')}
+            ${c.city ? ' · ' + esc(c.city) : ''}
+            ${c.country ? ' · ' + esc(c.country) : ''}
+          </small>
+        </span>
         <span class="author-id">ID ${esc(c.author_id)}</span>
-      </button>`).join('');
+      </button>
+    `).join('');
+
     $('liveAuthorMatches').classList.remove('hidden');
-    $('liveAuthorMatches').querySelectorAll('.live-author-card').forEach(btn => {
-      btn.addEventListener('click', () => loadLiveScopusAuthor(btn.dataset.authorId));
-    });
-    $('liveStatus').innerHTML = `<i></i><span>${candidates.length} possible match${candidates.length === 1 ? '' : 'es'} found. Select the correct faculty profile.</span>`;
+
+    $('liveAuthorMatches')
+      .querySelectorAll('.live-author-card')
+      .forEach(btn => {
+        btn.addEventListener(
+          'click',
+          () => loadLiveScopusAuthor(btn.dataset.authorId)
+        );
+      });
+
+    $('liveStatus').innerHTML =
+      `<i></i><span>${candidates.length} matching DSATM author${candidates.length === 1 ? '' : 's'} found. Select the correct profile.</span>`;
+
   } catch (e) {
-    $('liveStatus').innerHTML = `<i></i><span>${esc(e.message)}</span>`;
+    $('liveStatus').innerHTML =
+      `<i></i><span>${esc(e.message)}</span>`;
     toast(e.message);
   } finally {
     $('liveSearchBtn').disabled = false;
-    $('liveSearchBtn').innerHTML = '<span>Search Live Scopus</span><b>→</b>';
+    $('liveSearchBtn').innerHTML =
+      '<span>Search Live Scopus</span><b>→</b>';
   }
 }
 
@@ -578,55 +774,147 @@ $('uploadBtn').addEventListener(
 
 
 /* ==========================================================
-   REFRESH UPLOADED EXCEL WITH LIVE SCOPUS DATA
+   REFRESH MASTER EXCEL THROUGH GITHUB ACTIONS
 ========================================================== */
+
+async function initializeRefreshButton() {
+  const btn = $('refreshScopusExcelBtn');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.title = 'Refresh DSATM Scopus master dataset';
+}
+
+function refreshStageLabel(stage) {
+  const labels = {
+    queued: 'Starting',
+    updating_scopus: 'Updating Scopus',
+    updating_excel: 'Updating Excel',
+    deploying: 'Deploying',
+    complete: 'Updated successfully',
+    error: 'Refresh failed'
+  };
+  return labels[stage] || 'Updating';
+}
+
+function renderRefreshProgress(stage, percent, message) {
+  const steps = [
+    ['updating_scopus', 'Updating Scopus'],
+    ['updating_excel', 'Updating Excel'],
+    ['deploying', 'Deploying'],
+    ['complete', 'Updated successfully']
+  ];
+
+  const order = {
+    queued: 0,
+    updating_scopus: 1,
+    updating_excel: 2,
+    deploying: 3,
+    complete: 4,
+    error: -1
+  };
+
+  const current = order[stage] ?? 0;
+  const items = steps.map((item, index) => {
+    const done = stage === 'complete' || current > index + 1;
+    const active = current === index + 1;
+    const cls = done ? 'done' : (active ? 'active' : 'pending');
+    const icon = done ? '✓' : (active ? '●' : '○');
+    return `<span class="scopus-refresh-step ${cls}"><b>${icon}</b>${esc(item[1])}</span>`;
+  }).join('<span class="scopus-refresh-arrow">→</span>');
+
+  $('uploadStatus').classList.toggle('loaded', stage === 'complete');
+  $('uploadStatus').innerHTML = `
+    <div class="scopus-refresh-progress">
+      <div class="scopus-refresh-title">
+        <strong>${esc(refreshStageLabel(stage))}</strong>
+        <span>${Math.max(0, Math.min(100, Number(percent || 0)))}%</span>
+      </div>
+      <div class="scopus-refresh-track">
+        <div class="scopus-refresh-bar" style="width:${Math.max(0, Math.min(100, Number(percent || 0)))}%"></div>
+      </div>
+      <div class="scopus-refresh-steps">${items}</div>
+      <div class="scopus-refresh-message">${esc(message || '')}</div>
+    </div>`;
+}
+
+async function monitorScopusRefresh(trigger) {
+  const startedAt = trigger.triggered_at || '';
+  const beforeSha = trigger.before_sha || '';
+  const beforeHash = trigger.master_hash_before || '';
+  let transientErrors = 0;
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 4000));
+
+    const params = new URLSearchParams({
+      triggered_at: startedAt,
+      before_sha: beforeSha,
+      master_hash_before: beforeHash
+    });
+
+    try {
+      const r = await fetch(`/api/scopus/refresh-status?${params.toString()}&_=${Date.now()}`, {
+        cache: 'no-store'
+      });
+      const d = await r.json();
+
+      if (!r.ok) {
+        throw new Error(d.detail || d.error || 'Unable to read refresh status.');
+      }
+
+      transientErrors = 0;
+
+      if (d.stage === 'error' || d.success === false) {
+        renderRefreshProgress('error', 100, d.message || 'Scopus refresh failed.');
+        throw new Error(d.message || 'Scopus refresh failed.');
+      }
+
+      renderRefreshProgress(d.stage || 'updating_scopus', d.percent || 0, d.message || 'Refreshing…');
+
+      if (d.ready) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await bootstrapMasterDataset();
+        setMode('excel');
+        await loadSummary('');
+        toast(d.no_changes ? 'Refresh complete. No new Scopus changes.' : 'Latest Institution Summary loaded successfully.');
+        return d;
+      }
+    } catch (e) {
+      transientErrors += 1;
+      // A production deployment can briefly interrupt polling while Vercel
+      // switches traffic. Keep waiting through short network errors.
+      if (transientErrors >= 8) {
+        throw e;
+      }
+    }
+  }
+
+  throw new Error('Refresh is still running. Please check GitHub Actions and reload the page shortly.');
+}
+
+initializeRefreshButton();
 
 if ($('refreshScopusExcelBtn')) {
   $('refreshScopusExcelBtn').addEventListener('click', async () => {
     const btn = $('refreshScopusExcelBtn');
     btn.disabled = true;
-    btn.innerHTML = '<span>Refreshing faculty from Scopus…</span><b>•••</b>';
-
-    $('uploadStatus').innerHTML =
-      '<i></i><span>Retrieving current publications, citations and h-index values from Scopus…</span>';
+    btn.innerHTML = '<span>Refreshing Scopus…</span><b>•••</b>';
+    renderRefreshProgress('queued', 5, 'Starting the DSATM Scopus refresh in GitHub Actions…');
 
     try {
-      const r = await fetch('/api/scopus/refresh-excel?max_records_per_author=500');
+      const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
+      let d = {};
+      try { d = await r.json(); } catch (_) {}
 
       if (!r.ok) {
-        let message = 'Unable to refresh Excel from Scopus.';
-        try {
-          const d = await r.json();
-          message = d.detail || d.error || message;
-        } catch (_) {}
-        throw new Error(message);
+        throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
       }
 
-      const blob = await r.blob();
-      const disposition = r.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/i);
-      const filename = match ? match[1] : 'DSATM_Scopus_Live_Updated.xlsx';
-      const updated = r.headers.get('X-Scopus-Updated-Faculty') || '';
-      const issues = r.headers.get('X-Scopus-Refresh-Issues') || '0';
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      $('uploadStatus').classList.add('loaded');
-      $('uploadStatus').innerHTML =
-        `<i></i><span><strong>Live Scopus refresh completed</strong><br>${esc(updated)} faculty updated · ${esc(issues)} issue(s). Updated workbook downloaded.</span>`;
-      toast('Live Scopus workbook created successfully.');
-
+      toast('Scopus refresh started.');
+      await monitorScopusRefresh(d);
     } catch (e) {
-      $('uploadStatus').classList.remove('loaded');
-      $('uploadStatus').innerHTML = `<i></i><span>${esc(e.message)}</span>`;
-      toast(e.message);
+      renderRefreshProgress('error', 100, e.message || 'Unable to refresh Scopus.');
+      toast(e.message || 'Unable to refresh Scopus.');
     } finally {
       btn.disabled = false;
       btn.innerHTML = '<span>Refresh Excel from Live Scopus</span><b>↻</b>';
@@ -1937,25 +2225,27 @@ function renderPublications() {
 
 
                     <td>
-
-                        ${r.link
-
-          ?
-
-          `<a
+                        <div class="access-links">
+                            ${r.doi
+          ? `<a
                                 class="doi-link"
                                 target="_blank"
                                 rel="noopener"
-                                href="${esc(r.link)}"
-                             >
-                                Open ↗
-                             </a>`
+                                href="${esc(r.doi_url || `https://doi.org/${r.doi}`)}"
+                             >DOI ↗</a>`
+          : ''}
 
-          :
+                            ${r.eid
+          ? `<a
+                                class="doi-link scopus-link"
+                                target="_blank"
+                                rel="noopener"
+                                href="${esc(r.scopus_url || `https://www.scopus.com/record/display.uri?eid=${encodeURIComponent(r.eid)}&origin=resultslist`)}"
+                             >Scopus ↗</a>`
+          : ''}
 
-          esc(r.doi || '—')
-        }
-
+                            ${(!r.doi && !r.eid) ? '—' : ''}
+                        </div>
                     </td>
 
                 </tr>`
@@ -2666,7 +2956,12 @@ if ($('changeDatasetBtn')) {
 
 
 /* ==========================================================
-   INITIAL MODE
+   APPLICATION STARTUP
 ========================================================== */
 
-setMode('live');
+document.addEventListener('DOMContentLoaded', async () => {
+  const loaded = await bootstrapMasterDataset();
+  if (!loaded) {
+    setMode('live');
+  }
+});

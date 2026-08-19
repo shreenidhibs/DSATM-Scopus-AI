@@ -1177,10 +1177,25 @@ td {
   text-overflow: ellipsis
 }
 
+.access-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap
+}
+
 .doi-link {
   color: #2e70d5;
   text-decoration: none;
   font-weight: 800
+}
+
+.doi-link:hover {
+  text-decoration: underline
+}
+
+.scopus-link {
+  color: #173d70
 }
 
 .summary-titlebar {
