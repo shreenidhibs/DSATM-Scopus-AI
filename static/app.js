@@ -912,7 +912,7 @@ if ($('refreshScopusExcelBtn')) {
         renderRefreshProgress('updating_scopus', 25, 'Refreshing Scopus directly on this local machine…');
         const r = await fetch('/api/scopus/local-refresh', { method: 'POST' });
         let d = {};
-        try { d = await r.json(); } catch (_) {}
+        try { d = await r.json(); } catch (_) { }
 
         if (!r.ok) {
           throw new Error(d.detail || d.error || 'Unable to refresh the local Scopus master.');
@@ -928,7 +928,7 @@ if ($('refreshScopusExcelBtn')) {
         renderRefreshProgress('queued', 5, 'Starting the DSATM Scopus refresh in GitHub Actions…');
         const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
         let d = {};
-        try { d = await r.json(); } catch (_) {}
+        try { d = await r.json(); } catch (_) { }
 
         if (!r.ok) {
           throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
@@ -2467,11 +2467,6 @@ async function loadSummary(
     $('sumLatestYear').textContent =
       d.latest_year ?? '—';
 
-
-    $('sumLeader').textContent =
-      d.top_faculty ||
-      d.rows?.[0]?.faculty ||
-      '—';
 
 
     renderOverviewBars(

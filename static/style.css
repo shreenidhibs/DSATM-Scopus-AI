@@ -1921,9 +1921,9 @@ td {
 
 .summary-overview-grid {
   display: grid;
-  grid-template-columns: .72fr 1.14fr 1.14fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin: 0 0 14px
+  margin: 0 0 14px;
 }
 
 .overview-card {
