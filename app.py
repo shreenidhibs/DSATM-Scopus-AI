@@ -1753,32 +1753,103 @@ async def upload_excel(
 
 @app.get("/api/dashboard")
 def dashboard(faculty: str):
+    """Return the faculty dashboard using Live Scopus as the canonical source.
+
+    The institutional Excel workbook remains the faculty directory / identity
+    source, but when a valid Scopus Author ID is available the publication
+    metrics and publication list are fetched through the exact same live
+    Scopus path used by the Live Scopus screen.  This guarantees that the
+    Excel-profile screen and Live Scopus screen show the same publication
+    count, citations, years, sources and publication records.
+
+    If a faculty member has no usable Scopus Author ID, the endpoint falls
+    back to the records stored in the institutional workbook.
+    """
     df = STATE.get("df")
     if df is None:
         raise HTTPException(400, "Upload an Excel file first.")
+
     mapping = STATE["mapping"]
     filtered = filter_faculty(df, mapping, faculty)
     records = [record(row, mapping) for _, row in filtered.iterrows()]
-    years, sources, types, source_types = {}, {}, {}, {"Journal": 0, "Conference": 0, "Other": 0}
+    local_department = faculty_department(
+        filtered, mapping, faculty, STATE["institution_keyword"]
+    )
+
+    # Resolve the author ID from the institutional Excel directory first.
+    author_id = detect_author_id(records, faculty)
+    clean_author_id = re.sub(r"\D", "", str(author_id or ""))
+
+    # Preferred path: use the SAME live endpoint logic as the Live Scopus tab.
+    # Keeping both views on one canonical data path prevents 3-vs-4 (or similar)
+    # publication mismatches after Scopus receives a new indexed record.
+    if clean_author_id:
+        try:
+            live = api_scopus_author(clean_author_id)
+            if isinstance(live, dict) and live.get("success"):
+                live = dict(live)
+                # Keep the institutional directory identity/department in the
+                # Excel view while retaining live publication data and KPIs.
+                live["faculty"] = faculty
+                live["faculty_name"] = faculty
+                live["department"] = local_department
+                live["scopus_author_id"] = clean_author_id
+                live["author_id"] = clean_author_id
+                live["data_source"] = "Excel Dataset + Live Scopus Sync"
+                live["synchronized_with_live_scopus"] = True
+                return live
+        except Exception as exc:
+            # Do not break the institutional dashboard if the Scopus API is
+            # temporarily unavailable; use the Excel snapshot as a fallback.
+            print(
+                f"Live synchronization fallback for {faculty} "
+                f"({clean_author_id}): {exc}"
+            )
+
+    # Fallback: original Excel-only analytics.
+    years, sources, types, source_types = {}, {}, {}, {
+        "Journal": 0, "Conference": 0, "Other": 0
+    }
     total_citations = 0
     for r in records:
         total_citations += r["citations"]
-        y = r["year"] or "Unknown"; years[y] = years.get(y, 0) + 1
-        src = r["source"] or "Unknown source"; sources[src] = sources.get(src, 0) + 1
-        typ = r["document_type"] or "Unspecified"; types[typ] = types.get(typ, 0) + 1
+        y = r["year"] or "Unknown"
+        years[y] = years.get(y, 0) + 1
+        src = r["source"] or "Unknown source"
+        sources[src] = sources.get(src, 0) + 1
+        typ = r["document_type"] or "Unspecified"
+        types[typ] = types.get(typ, 0) + 1
         source_types[classify_source_type(typ)] += 1
+
     years_sorted = dict(sorted(years.items(), key=lambda x: x[0]))
     top_sources = dict(sorted(sources.items(), key=lambda x: x[1], reverse=True)[:8])
     latest_year = max((int(y) for y in years if y.isdigit()), default=None)
     latest_count = years.get(str(latest_year), 0) if latest_year else 0
     citation_values = [r["citations"] for r in records]
+
     return {
         "faculty": faculty,
-        "department": faculty_department(filtered, mapping, faculty, STATE["institution_keyword"]),
-        "scopus_author_id": detect_author_id(records, faculty),
-        "kpis": {"publications": len(records), "citations": total_citations, "h_index": calc_h_index(citation_values), "coauthors": coauthor_count(records, faculty), "latest_year": latest_year or "—", "latest_year_publications": latest_count, "unique_sources": len(sources)},
-        "by_year": years_sorted, "top_sources": top_sources, "document_types": types, "source_types": source_types,
-        "publications": sorted(records, key=lambda r: (r["year"], r["citations"]), reverse=True),
+        "faculty_name": faculty,
+        "department": local_department,
+        "scopus_author_id": author_id,
+        "data_source": "Excel Dataset",
+        "synchronized_with_live_scopus": False,
+        "kpis": {
+            "publications": len(records),
+            "citations": total_citations,
+            "h_index": calc_h_index(citation_values),
+            "coauthors": coauthor_count(records, faculty),
+            "latest_year": latest_year or "—",
+            "latest_year_publications": latest_count,
+            "unique_sources": len(sources),
+        },
+        "by_year": years_sorted,
+        "top_sources": top_sources,
+        "document_types": types,
+        "source_types": source_types,
+        "publications": sorted(
+            records, key=lambda r: (r["year"], r["citations"]), reverse=True
+        ),
     }
 
 

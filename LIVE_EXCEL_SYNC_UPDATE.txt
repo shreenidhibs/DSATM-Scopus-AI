@@ -1,0 +1,20 @@
+DSATM Scopus AI - Live/Excel Synchronization Update
+
+Implemented:
+- Faculty dashboard now uses the same Live Scopus publication source as the Live Scopus screen whenever a valid Scopus Author ID is available.
+- Excel Dataset view keeps the institutional faculty name and department.
+- Publication count, citation count, h-index, years, sources, document types and publication rows are taken from the same live Scopus response.
+- DOI and Scopus links remain separate.
+- If Scopus is temporarily unavailable, the dashboard automatically falls back to the Excel snapshot.
+
+Expected result:
+For the same Scopus Author ID, Live Scopus and Excel Dataset faculty dashboards show the same publication data.
+
+Deploy:
+git add app.py static/app.js static/style.css
+git commit -m "Synchronize Excel faculty dashboard with Live Scopus"
+git push origin main
+
+After Vercel shows Ready, hard refresh the browser:
+Mac: Cmd + Shift + R
+Windows: Ctrl + F5
