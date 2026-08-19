@@ -131,15 +131,17 @@ function setMode(mode) {
     $('homeSummaryBtn').disabled =
       !summaryEnabled;
   }
-}
-const dashboardEnabled =
-  mode === 'excel' &&
-  facultyMeta.length > 0;
 
-if ($('openDashboardBtn')) {
-  $('openDashboardBtn').disabled =
-    !dashboardEnabled;
+  const dashboardEnabled =
+    mode === 'excel' &&
+    facultyMeta.length > 0;
+
+  if ($('openDashboardBtn')) {
+    $('openDashboardBtn').disabled =
+      !dashboardEnabled;
+  }
 }
+
 
 $('modeLiveBtn').addEventListener(
   'click',
@@ -902,7 +904,7 @@ if ($('refreshScopusExcelBtn')) {
     try {
       const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
       let d = {};
-      try { d = await r.json(); } catch (_) { }
+      try { d = await r.json(); } catch (_) {}
 
       if (!r.ok) {
         throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
@@ -2792,44 +2794,31 @@ if ($('openDashboardBtn')) {
   $('openDashboardBtn')
     .addEventListener(
       'click',
-      async () => {
+      () => {
 
-        /* If a faculty is already selected */
-        if (selectedFaculty) {
-
-          await loadFaculty(
-            selectedFaculty
-          );
-
-          return;
-        }
-
-        /* If dashboard data already exists */
         if (lastDashboard) {
 
           renderDashboard(
             lastDashboard,
-            'excel'
+            currentDataSource
           );
 
           return;
         }
 
-        /* Otherwise open first faculty */
+
         if (facultyMeta.length) {
 
-          selectedFaculty =
-            facultyMeta[0].faculty;
-
-          await loadFaculty(
-            selectedFaculty
+          loadFaculty(
+            facultyMeta[0].faculty
           );
 
           return;
         }
 
+
         toast(
-          'Faculty dataset is not available.'
+          'Search Live Scopus or upload an Excel dataset first.'
         );
       }
     );
