@@ -6,7 +6,7 @@ let selectedLiveAuthorId = '';
 let currentPublications = [];
 let summaryRows = [];
 let lastDashboard = null;
-let currentDataSource = 'live';
+let currentDataSource = 'excel';
 
 const esc = (s = '') =>
   String(s).replace(/[&<>'"]/g, c => ({
@@ -38,7 +38,110 @@ const toast = msg => {
     3000
   );
 };
+/* ==========================================================
+   AUTO LOAD MASTER DATASET
+========================================================== */
 
+async function bootstrapMasterDataset() {
+
+  try {
+
+    const r = await fetch(
+      '/api/bootstrap'
+    );
+
+    const d = await r.json();
+
+    if (!r.ok || !d.loaded) {
+
+      console.log(
+        'Master dataset not loaded.'
+      );
+
+      return;
+    }
+
+
+    facultyMeta =
+      d.faculty_meta || [];
+
+
+    $('facultyMeta').textContent =
+      `${d.faculty_count} faculty available`;
+
+
+    fillDepartments(
+      d.departments || []
+    );
+
+
+    applyFacultyFilters();
+
+
+    // Enable faculty directory controls
+    $('facultySearch').disabled =
+      false;
+
+    $('departmentFilter').disabled =
+      false;
+
+
+    if ($('searchBy')) {
+
+      $('searchBy').disabled =
+        false;
+    }
+
+
+    // Enable Faculty Dashboard
+    if ($('openDashboardBtn')) {
+
+      $('openDashboardBtn').disabled =
+        false;
+    }
+
+
+    // Enable Institution Summary
+    $('summaryBtn').disabled =
+      false;
+
+
+    if ($('sideSummaryBtn')) {
+
+      $('sideSummaryBtn').disabled =
+        false;
+    }
+
+
+    if ($('homeSummaryBtn')) {
+
+      $('homeSummaryBtn').disabled =
+        false;
+    }
+
+
+    // Refresh button
+    if ($('refreshScopusExcelBtn')) {
+
+      $('refreshScopusExcelBtn')
+        .disabled = false;
+    }
+
+
+    console.log(
+      `Auto loaded ${d.faculty_count} faculty from ${d.filename}`
+    );
+
+  }
+
+  catch (e) {
+
+    console.error(
+      'Bootstrap failed:',
+      e
+    );
+  }
+}
 
 /* ==========================================================
    DATA SOURCE MODE
@@ -756,7 +859,7 @@ if ($('refreshScopusExcelBtn')) {
     try {
       const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
       let d = {};
-      try { d = await r.json(); } catch (_) {}
+      try { d = await r.json(); } catch (_) { }
 
       if (!r.ok) {
         throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
@@ -2677,7 +2780,7 @@ if ($('openDashboardBtn')) {
 
 
         toast(
-          'Search Live Scopus or upload an Excel dataset first.'
+          'Faculty dataset is not available.'
         );
       }
     );
@@ -2701,7 +2804,7 @@ if ($('homeSummaryBtn')) {
         ) {
 
           toast(
-            'Upload an institutional Excel dataset first.'
+            'Institution dataset is not available.'
           );
 
           return;
@@ -2731,7 +2834,7 @@ if ($('sideSummaryBtn')) {
         ) {
 
           toast(
-            'Institution Summary is available for Excel Data mode.'
+            'Institution dataset is not available.'
           );
 
           return;
@@ -2817,3 +2920,19 @@ if ($('changeDatasetBtn')) {
 ========================================================== */
 
 setMode('live');
+
+/* ==========================================================
+   APPLICATION STARTUP
+========================================================== */
+
+document.addEventListener(
+  'DOMContentLoaded',
+  async () => {
+
+    await bootstrapMasterDataset();
+    if (facultyMeta.length) {
+      setMode('excel');
+    }
+
+  }
+);

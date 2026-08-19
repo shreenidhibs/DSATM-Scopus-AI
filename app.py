@@ -2706,7 +2706,7 @@ def github_update_status():
     }
 
 
-def _load_master_dataset_for_refresh() -> None:
+def load_master_dataset() -> None:
     """Load the bundled institutional Scopus export when no manual upload exists."""
     global faculty_meta_cache
 
@@ -2714,9 +2714,9 @@ def _load_master_dataset_for_refresh() -> None:
         return
 
     candidates = [
-        BASE_DIR / "DSATM Scopus.xls",
-        BASE_DIR / "DSATM Scopus.xlsx",
         BASE_DIR / "DSATM Scopus Master.xlsx",
+        BASE_DIR / "DSATM Scopus.xlsx",
+        BASE_DIR / "DSATM Scopus.xls"
     ]
     master = next((x for x in candidates if x.exists()), None)
     if master is None:
@@ -2754,7 +2754,71 @@ def _load_master_dataset_for_refresh() -> None:
         "departments": departments,
         "overall": overall,
     })
+# =========================================================
+# AUTO LOAD LATEST DSATM MASTER DATASET
+# =========================================================
 
+try:
+    load_master_dataset()
+
+    print("\n============================================")
+    print("DSATM MASTER DATASET AUTO LOADED")
+    print("============================================")
+    print("File:", STATE.get("filename"))
+    print(
+        "Faculty:",
+        len(STATE.get("faculty_meta") or [])
+    )
+    print(
+        "Records:",
+        len(STATE["df"])
+        if STATE.get("df") is not None
+        else 0
+    )
+    print("============================================\n")
+
+except Exception as exc:
+
+    print(
+        "AUTO LOAD MASTER DATASET FAILED:",
+        str(exc)
+    )
+
+@app.get("/api/bootstrap")
+def api_bootstrap():
+
+    df = STATE.get("df")
+
+    faculty_meta = list(
+        STATE.get("faculty_meta")
+        or faculty_meta_cache
+        or []
+    )
+
+    return {
+        "success": True,
+        "loaded": df is not None,
+        "filename": STATE.get("filename", ""),
+        "rows": (
+            len(df)
+            if df is not None
+            else 0
+        ),
+        "faculty_count": len(faculty_meta),
+        "faculty_meta": faculty_meta,
+        "departments": (
+            STATE.get("departments")
+            or []
+        ),
+        "institution_keyword": (
+            STATE.get("institution_keyword")
+            or DSATM_INSTITUTION_NAME
+        ),
+        "institution_ready": (
+            df is not None
+            and len(faculty_meta) > 0
+        )
+    }
 
 @app.post("/api/scopus/trigger-refresh")
 def trigger_scopus_github_action():
@@ -2819,7 +2883,7 @@ def refresh_excel_from_scopus(max_records_per_author: int = 500):
     """
     # No manual upload is required. On a fresh Vercel instance, hydrate the
     # application state from the bundled institutional Scopus workbook.
-    _load_master_dataset_for_refresh()
+    load_master_dataset()
 
     faculty_rows = list(STATE.get("faculty_meta") or [])
     if not faculty_rows:
