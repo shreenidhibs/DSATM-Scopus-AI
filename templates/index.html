@@ -327,11 +327,19 @@
             </div>
             <div id="summaryDeptBars" class="overview-bars"></div>
           </article>
-          <article class="panel overview-card">
-            <div class="panel-head">
+          <article class="panel overview-card trend-overview-card">
+            <div class="panel-head trend-panel-head">
               <div><span class="panel-kicker">TREND</span>
-                <h3>Publications by Year</h3>
-                <p>Institution-wide indexed output.</p>
+                <h3 id="summaryTrendTitle">Publications by Year</h3>
+                <p id="summaryTrendSubtitle">Institution-wide indexed output.</p>
+              </div>
+              <div class="summary-trend-actions">
+                <div class="trend-toggle" aria-label="Publication trend view">
+                  <button id="trendYearBtn" type="button" class="active">Year-wise</button>
+                  <button id="trendMonthBtn" type="button">Month-wise</button>
+                </div>
+                <select id="trendYearSelect" class="hidden" aria-label="Select year for month-wise trend"></select>
+                <button id="exportTrendBtn" type="button" class="trend-export-btn" title="Download detailed publication records for the selected year/month">⇩ Excel</button>
               </div>
             </div>
             <div id="summaryYearBars" class="overview-bars"></div>

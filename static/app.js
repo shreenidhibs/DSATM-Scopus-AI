@@ -5,6 +5,10 @@ let selectedFaculty = '';
 let selectedLiveAuthorId = '';
 let currentPublications = [];
 let summaryRows = [];
+let summaryTrendData = { by_year: {}, by_month: {}, month_years: [] };
+let summaryTrendMode = 'year';
+let summaryTrendSelectedYear = '';
+let summaryTrendSelectedMonth = '';
 let lastDashboard = null;
 let currentDataSource = 'excel';
 
@@ -899,19 +903,40 @@ if ($('refreshScopusExcelBtn')) {
     const btn = $('refreshScopusExcelBtn');
     btn.disabled = true;
     btn.innerHTML = '<span>Refreshing Scopus…</span><b>•••</b>';
-    renderRefreshProgress('queued', 5, 'Starting the DSATM Scopus refresh in GitHub Actions…');
+    renderRefreshProgress('queued', 5, 'Preparing Scopus refresh…');
 
     try {
-      const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
-      let d = {};
-      try { d = await r.json(); } catch (_) {}
+      const isLocal = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
 
-      if (!r.ok) {
-        throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
+      if (isLocal) {
+        renderRefreshProgress('updating_scopus', 25, 'Refreshing Scopus directly on this local machine…');
+        const r = await fetch('/api/scopus/local-refresh', { method: 'POST' });
+        let d = {};
+        try { d = await r.json(); } catch (_) {}
+
+        if (!r.ok) {
+          throw new Error(d.detail || d.error || 'Unable to refresh the local Scopus master.');
+        }
+
+        renderRefreshProgress('updating_excel', 70, 'Scopus data retrieved. Reloading the local master Excel…');
+        await bootstrapMasterDataset();
+        setMode('excel');
+        await loadSummary('');
+        renderRefreshProgress('complete', 100, d.message || 'Local master Excel updated successfully.');
+        toast('Local Scopus master updated successfully.');
+      } else {
+        renderRefreshProgress('queued', 5, 'Starting the DSATM Scopus refresh in GitHub Actions…');
+        const r = await fetch('/api/scopus/trigger-refresh', { method: 'POST' });
+        let d = {};
+        try { d = await r.json(); } catch (_) {}
+
+        if (!r.ok) {
+          throw new Error(d.detail || d.error || 'Unable to start the GitHub Scopus refresh.');
+        }
+
+        toast('Scopus refresh started.');
+        await monitorScopusRefresh(d);
       }
-
-      toast('Scopus refresh started.');
-      await monitorScopusRefresh(d);
     } catch (e) {
       renderRefreshProgress('error', 100, e.message || 'Unable to refresh Scopus.');
       toast(e.message || 'Unable to refresh Scopus.');
@@ -2456,12 +2481,14 @@ async function loadSummary(
     );
 
 
-    renderOverviewBars(
-      'summaryYearBars',
-      d.by_year || {},
-      10,
-      true
-    );
+    summaryTrendData = {
+      by_year: d.by_year || {},
+      by_month: d.by_month || {},
+      month_years: d.month_years || Object.keys(d.by_month || {})
+    };
+
+    initializeSummaryTrendControls();
+    renderSummaryTrend(summaryTrendMode);
 
 
     renderSummary(
@@ -2499,6 +2526,134 @@ async function loadSummary(
 
 
 /* ==========================================================
+   INSTITUTION PUBLICATION TREND - YEAR / MONTH
+========================================================== */
+
+function initializeSummaryTrendControls() {
+  const select = $('trendYearSelect');
+  if (!select) return;
+
+  const years = (summaryTrendData.month_years || [])
+    .filter(Boolean)
+    .map(String)
+    .sort((a, b) => b.localeCompare(a));
+
+  select.innerHTML = years.length
+    ? years.map(y => `<option value="${esc(y)}">${esc(y)}</option>`).join('')
+    : '<option value="">No month data</option>';
+
+  if (years.length && !years.includes(select.value)) {
+    select.value = years[0];
+  }
+}
+
+function updateTrendExportButton() {
+  const btn = $('exportTrendBtn');
+  if (!btn) return;
+
+  if (summaryTrendMode === 'month') {
+    const year = $('trendYearSelect')?.value || summaryTrendSelectedYear || '';
+    const month = summaryTrendSelectedMonth || '';
+    btn.textContent = month && year ? `⇩ Excel — ${month} ${year}` : (year ? `⇩ Excel — ${year}` : '⇩ Excel');
+    btn.title = month && year
+      ? `Download all publication details for ${month} ${year}`
+      : (year ? `Download all publication details for ${year}` : 'Select a year/month to export publication details');
+    return;
+  }
+
+  btn.textContent = summaryTrendSelectedYear ? `⇩ Excel — ${summaryTrendSelectedYear}` : '⇩ Excel';
+  btn.title = summaryTrendSelectedYear
+    ? `Download all publication details for ${summaryTrendSelectedYear}`
+    : 'Select a year bar to export publication details';
+}
+
+function renderSummaryTrend(mode = 'year') {
+  summaryTrendMode = mode === 'month' ? 'month' : 'year';
+
+  const yearBtn = $('trendYearBtn');
+  const monthBtn = $('trendMonthBtn');
+  const yearSelect = $('trendYearSelect');
+  const title = $('summaryTrendTitle');
+  const subtitle = $('summaryTrendSubtitle');
+
+  if (yearBtn) yearBtn.classList.toggle('active', summaryTrendMode === 'year');
+  if (monthBtn) monthBtn.classList.toggle('active', summaryTrendMode === 'month');
+
+  if (summaryTrendMode === 'year') {
+    if (yearSelect) yearSelect.classList.add('hidden');
+    const years = Object.keys(summaryTrendData.by_year || {})
+      .filter(y => /^\d{4}$/.test(String(y)))
+      .sort((a, b) => String(b).localeCompare(String(a)));
+    if (!summaryTrendSelectedYear || !years.includes(String(summaryTrendSelectedYear))) {
+      summaryTrendSelectedYear = years[0] || '';
+    }
+    summaryTrendSelectedMonth = '';
+    if (title) title.textContent = 'Publications by Year';
+    if (subtitle) subtitle.textContent = summaryTrendSelectedYear
+      ? `Click any year to select it. Excel downloads the complete publication records for the selected year.`
+      : 'Institution-wide indexed output by publication year.';
+    renderOverviewBars('summaryYearBars', summaryTrendData.by_year || {}, 12, true);
+    updateTrendExportButton();
+    return;
+  }
+
+  if (yearSelect) yearSelect.classList.remove('hidden');
+  const selectedYear = yearSelect?.value || (summaryTrendData.month_years || [])[0] || '';
+  summaryTrendSelectedYear = selectedYear;
+  const monthData = (summaryTrendData.by_month || {})[selectedYear] || {};
+  if (summaryTrendSelectedMonth && !(summaryTrendSelectedMonth in monthData)) {
+    summaryTrendSelectedMonth = '';
+  }
+  if (title) title.textContent = selectedYear ? `Publications by Month — ${selectedYear}` : 'Publications by Month';
+  if (subtitle) subtitle.textContent = selectedYear
+    ? `Click a month to export that month's publication details. Without a month selection, Excel downloads all ${selectedYear} publications.`
+    : 'Month-wise data becomes available after a Scopus master refresh.';
+  renderOverviewBars('summaryYearBars', monthData, 12, 'month');
+  updateTrendExportButton();
+}
+
+if ($('trendYearBtn')) {
+  $('trendYearBtn').addEventListener('click', () => renderSummaryTrend('year'));
+}
+
+if ($('trendMonthBtn')) {
+  $('trendMonthBtn').addEventListener('click', () => renderSummaryTrend('month'));
+}
+
+if ($('trendYearSelect')) {
+  $('trendYearSelect').addEventListener('change', () => {
+    summaryTrendSelectedYear = $('trendYearSelect').value || '';
+    summaryTrendSelectedMonth = '';
+    renderSummaryTrend('month');
+  });
+}
+
+if ($('exportTrendBtn')) {
+  $('exportTrendBtn').addEventListener('click', () => {
+    const year = summaryTrendMode === 'month'
+      ? ($('trendYearSelect')?.value || summaryTrendSelectedYear)
+      : summaryTrendSelectedYear;
+
+    if (!year) {
+      toast('Select a publication year first.');
+      return;
+    }
+
+    const params = new URLSearchParams({ year: String(year) });
+    if (summaryTrendMode === 'month' && summaryTrendSelectedMonth) {
+      const monthMap = {
+        Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+        Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12
+      };
+      const monthNumber = monthMap[summaryTrendSelectedMonth];
+      if (monthNumber) params.set('month', String(monthNumber));
+    }
+
+    window.location.href = `/api/summary/publications-export?${params.toString()}`;
+  });
+}
+
+/* ==========================================================
    SUMMARY BARS
 ========================================================== */
 
@@ -2527,7 +2682,18 @@ function renderOverviewBars(
       );
 
 
-  if (chronological) {
+  if (chronological === 'month') {
+
+    const monthOrder = {
+      Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+      Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12
+    };
+
+    entries = entries
+      .sort((a, b) => (monthOrder[a[0]] || 99) - (monthOrder[b[0]] || 99))
+      .slice(0, limit);
+
+  } else if (chronological) {
 
     entries =
       entries
@@ -2571,7 +2737,7 @@ function renderOverviewBars(
     entries.map(
       ([label, value]) =>
 
-        `<div class="overview-bar-row">
+        `<div class="overview-bar-row ${id === 'summaryYearBars' ? 'trend-selectable' : ''} ${id === 'summaryYearBars' && ((chronological === 'month' && String(label) === String(summaryTrendSelectedMonth)) || (chronological !== 'month' && String(label) === String(summaryTrendSelectedYear))) ? 'selected' : ''}" ${id === 'summaryYearBars' ? `data-trend-label="${esc(label)}"` : ''}>
 
                     <div class="overview-bar-label">
 
@@ -2608,6 +2774,24 @@ function renderOverviewBars(
     ||
 
     '<p class="faculty-meta">No data available.</p>';
+
+  if (id === 'summaryYearBars') {
+    box.querySelectorAll('.trend-selectable').forEach(row => {
+      row.addEventListener('click', () => {
+        const label = row.dataset.trendLabel || '';
+        if (!label) return;
+
+        if (chronological === 'month') {
+          summaryTrendSelectedMonth = label;
+        } else {
+          summaryTrendSelectedYear = label;
+          summaryTrendSelectedMonth = '';
+        }
+
+        renderSummaryTrend(summaryTrendMode);
+      });
+    });
+  }
 }
 
 

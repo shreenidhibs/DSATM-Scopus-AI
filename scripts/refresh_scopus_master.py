@@ -177,6 +177,7 @@ def apply_entry(df: pd.DataFrame, index: int, entry: dict[str, Any]) -> None:
     values = {
             "Title": clean(entry.get("dc:title")),
             "Year": cover_date[:4],
+            "Publication Date": cover_date,
             "Source title": clean(entry.get("prism:publicationName")),
             "Cited by": clean(entry.get("citedby-count")) or "0",
             "DOI": clean(entry.get("prism:doi")),
@@ -228,6 +229,7 @@ def new_row(columns: list[str], entry: dict[str, Any]) -> dict[str, Any]:
         "Author(s) ID": "",
         "Title": clean(entry.get("dc:title")),
         "Year": year_value,
+        "Publication Date": cover_date,
         "Source title": clean(entry.get("prism:publicationName")),
        "Cited by": citation_value,
         "DOI": clean(entry.get("prism:doi")),
@@ -274,6 +276,11 @@ def main() -> None:
         pd.notna(df),
         ""
     )
+
+    # Scopus cover date powers the Institution Summary month-wise trend.
+    if "Publication Date" not in df.columns:
+        df["Publication Date"] = ""
+
     existing_count = len(df)
     print(f"Existing master publications: {existing_count}", flush=True)
 
@@ -337,9 +344,6 @@ def main() -> None:
             ignore_index=True
         )
         
-
-    if new_rows:
-        df = pd.concat([df, pd.DataFrame(new_rows, columns=df.columns)], ignore_index=True)
 
     # Final authoritative de-duplication.
     seen: set[str] = set()

@@ -5,6 +5,8 @@ import hashlib
 import base64
 import os
 import re
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from collections import Counter
@@ -1291,6 +1293,7 @@ ALIASES = {
     "affiliations": ["affiliations", "affiliation"],
     "title": ["title", "document title", "article title"],
     "year": ["year", "publication year"],
+    "publication_date": ["publication date", "cover date", "coverdate", "publication cover date"],
     "source": ["source title", "source", "journal", "publication name"],
     "cited_by": ["cited by", "citations", "citation count"],
     "doi": ["doi", "digital object identifier"],
@@ -1562,6 +1565,22 @@ def institution_overall(df: pd.DataFrame, mapping: dict[str, str | None], meta: 
 
     source_col = mapping.get("source")
     unique_sources = int(df[source_col].fillna("").astype(str).replace("", pd.NA).nunique()) if source_col else 0
+    # Month-wise publication trend is available when the synchronized master
+    # contains Scopus cover dates. The refresh process populates this field.
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    month_counts: dict[str, dict[str, int]] = {}
+    date_col = mapping.get("publication_date")
+    if date_col and date_col in df.columns:
+        for raw in df[date_col].fillna(""):
+            parsed = pd.to_datetime(raw, errors="coerce")
+            if pd.isna(parsed):
+                continue
+            y = str(int(parsed.year))
+            month = month_names[int(parsed.month) - 1]
+            if y not in month_counts:
+                month_counts[y] = {m: 0 for m in month_names}
+            month_counts[y][month] += 1
+
     valid_years = [int(y) for y in year_counts if y.isdigit()]
     latest_year = max(valid_years) if valid_years else None
 
@@ -1580,6 +1599,8 @@ def institution_overall(df: pd.DataFrame, mapping: dict[str, str | None], meta: 
         "latest_year": latest_year or "—",
         "top_faculty": top_faculty[0]["faculty"] if top_faculty else "—",
         "by_year": dict(sorted(year_counts.items(), key=lambda x: x[0])),
+        "by_month": {y: month_counts[y] for y in sorted(month_counts)},
+        "month_years": sorted(month_counts.keys()),
         "department_faculty_counts": dict(sorted(dept_counts.items(), key=lambda x: x[1], reverse=True)),
     }
 
@@ -1887,11 +1908,184 @@ def summary(department: str = ""):
         "latest_year": overall.get("latest_year", "—"),
         "top_faculty": overall.get("top_faculty", "—"),
         "by_year": overall.get("by_year", {}),
+        "by_month": overall.get("by_month", {}),
+        "month_years": overall.get("month_years", []),
         "department_faculty_counts": overall.get("department_faculty_counts", {}),
         "faculty_publication_links": overall.get("faculty_publication_links"),
         "departments": STATE.get("departments", []),
     }
 
+
+
+@app.get("/api/summary/publications-export")
+def export_institution_publications(year: int, month: int | None = None):
+    """Export detailed institution publication records for a selected year/month."""
+    df = STATE.get("df")
+    mapping = STATE.get("mapping") or {}
+    if df is None:
+        raise HTTPException(400, "Upload or load the institutional Excel dataset first.")
+
+    if month is not None and not 1 <= int(month) <= 12:
+        raise HTTPException(400, "Month must be between 1 and 12.")
+
+    work = df.copy()
+    year_col = mapping.get("year")
+    date_col = mapping.get("publication_date")
+
+    if year_col and year_col in work.columns:
+        years = pd.to_numeric(work[year_col], errors="coerce")
+        mask = years.eq(int(year))
+    elif date_col and date_col in work.columns:
+        dates = pd.to_datetime(work[date_col], errors="coerce")
+        mask = dates.dt.year.eq(int(year))
+    else:
+        raise HTTPException(400, "Publication year is not available in the institutional dataset.")
+
+    parsed_dates = None
+    if month is not None:
+        if not date_col or date_col not in work.columns:
+            raise HTTPException(400, "Month-wise export requires Publication Date. Run Refresh Excel from Live Scopus first.")
+        parsed_dates = pd.to_datetime(work[date_col], errors="coerce")
+        mask = mask & parsed_dates.dt.month.eq(int(month))
+
+    filtered = work.loc[mask].copy()
+
+    # Build a clean, publication-focused sheet while preserving useful Scopus metadata.
+    export_specs = [
+        ("Title", "title"),
+        ("Authors", "authors"),
+        ("Author(s) ID", "author_ids"),
+        ("Authors with Affiliations", "authors_affiliations"),
+        ("Affiliations", "affiliations"),
+        ("Year", "year"),
+        ("Publication Date", "publication_date"),
+        ("Source Title", "source"),
+        ("Citations", "cited_by"),
+        ("Document Type", "document_type"),
+        ("DOI", "doi"),
+        ("Scopus EID", "eid"),
+        ("Scopus Link", "link"),
+        ("Abstract", "abstract"),
+        ("Keywords", "keywords"),
+    ]
+
+    export_data: dict[str, Any] = {}
+    for label, key in export_specs:
+        col = mapping.get(key)
+        if col and col in filtered.columns:
+            export_data[label] = filtered[col].fillna("").astype(str).tolist()
+        else:
+            export_data[label] = [""] * len(filtered)
+
+    out_df = pd.DataFrame(export_data)
+
+    # Provide working URLs even when the source workbook has no direct Link field.
+    if not out_df.empty:
+        for idx in out_df.index:
+            eid = str(out_df.at[idx, "Scopus EID"] or "").strip()
+            link = str(out_df.at[idx, "Scopus Link"] or "").strip()
+            if not link and eid:
+                out_df.at[idx, "Scopus Link"] = f"https://www.scopus.com/record/display.uri?eid={eid}&origin=resultslist"
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        out_df.to_excel(writer, index=False, sheet_name="Publications")
+
+        summary_rows = [
+            {"Field": "Institution", "Value": "DSATM"},
+            {"Field": "Year", "Value": int(year)},
+            {"Field": "Month", "Value": datetime(2000, int(month), 1).strftime("%B") if month else "All months"},
+            {"Field": "Publication Count", "Value": len(out_df)},
+            {"Field": "Generated At", "Value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        ]
+        pd.DataFrame(summary_rows).to_excel(writer, index=False, sheet_name="Summary")
+
+        pub_sheet = writer.book["Publications"]
+        pub_sheet.freeze_panes = "A2"
+        pub_sheet.auto_filter.ref = pub_sheet.dimensions
+        preferred_widths = {
+            "A": 55, "B": 45, "C": 28, "D": 55, "E": 45, "F": 10, "G": 16,
+            "H": 38, "I": 12, "J": 18, "K": 28, "L": 24, "M": 48, "N": 70, "O": 45,
+        }
+        for col_letter, width in preferred_widths.items():
+            pub_sheet.column_dimensions[col_letter].width = width
+
+        summary_sheet = writer.book["Summary"]
+        summary_sheet.freeze_panes = "A2"
+        summary_sheet.column_dimensions["A"].width = 24
+        summary_sheet.column_dimensions["B"].width = 28
+
+    output.seek(0)
+    if month:
+        month_label = datetime(2000, int(month), 1).strftime("%b")
+        filename = f"DSATM_Publications_{year}_{month_label}_{len(out_df)}_records.xlsx"
+    else:
+        filename = f"DSATM_Publications_{year}_{len(out_df)}_records.xlsx"
+
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
+
+
+@app.get("/api/summary/trend-export")
+def export_institution_publication_trend():
+    """Export institution publication trends in year-wise and month-wise sheets."""
+    df = STATE.get("df")
+    if df is None:
+        raise HTTPException(400, "Upload or load the institutional Excel dataset first.")
+
+    overall = dict(STATE.get("overall") or {})
+    by_year = overall.get("by_year", {}) or {}
+    by_month = overall.get("by_month", {}) or {}
+
+    year_rows = [
+        {"Year": year, "Publication Count": int(count or 0)}
+        for year, count in sorted(by_year.items(), key=lambda x: str(x[0]))
+        if str(year).isdigit()
+    ]
+
+    month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    month_rows = []
+    for year in sorted(by_month, key=str):
+        counts = by_month.get(year, {}) or {}
+        for month_number, month in enumerate(month_order, start=1):
+            month_rows.append({
+                "Year": year,
+                "Month Number": month_number,
+                "Month": month,
+                "Publication Count": int(counts.get(month, 0) or 0),
+            })
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(year_rows, columns=["Year", "Publication Count"]).to_excel(
+            writer, index=False, sheet_name="Year-wise Publications"
+        )
+        pd.DataFrame(
+            month_rows,
+            columns=["Year", "Month Number", "Month", "Publication Count"],
+        ).to_excel(writer, index=False, sheet_name="Month-wise Publications")
+
+        # Make the exported sheets immediately readable.
+        for sheet in writer.book.worksheets:
+            sheet.freeze_panes = "A2"
+            for column_cells in sheet.columns:
+                width = max(len(str(cell.value or "")) for cell in column_cells) + 2
+                sheet.column_dimensions[column_cells[0].column_letter].width = min(max(width, 12), 28)
+
+    output.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d")
+    headers = {
+        "Content-Disposition": f'attachment; filename="DSATM_Publication_Trend_{stamp}.xlsx"'
+    }
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
 
 
 @app.get("/api/scopus/test")
@@ -2923,6 +3117,84 @@ def _parse_github_time(value: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
         return None
+
+@app.post("/api/scopus/local-refresh")
+def local_scopus_master_refresh(request: Request):
+    """Refresh the bundled master workbook directly when running locally.
+
+    Local development must not depend on a GitHub token. The same refresh
+    script used by GitHub Actions is executed with the current Python
+    interpreter, the in-memory dataset is reloaded, and a compact JSON status
+    is returned to the browser.
+    """
+    if os.getenv("VERCEL", "").strip():
+        raise HTTPException(400, "Direct local refresh is disabled on Vercel. Use the GitHub refresh workflow.")
+
+    client_host = (request.client.host if request.client else "").strip().lower()
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(403, "Direct refresh is available only from localhost.")
+
+    script = BASE_DIR / "scripts" / "refresh_scopus_master.py"
+    if not script.exists():
+        raise HTTPException(500, f"Local refresh script not found: {script.name}")
+
+    if not os.getenv("ELS_API_KEY", "").strip():
+        raise HTTPException(500, "ELS_API_KEY is missing. Add it to the local .env file.")
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(BASE_DIR),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "Local Scopus refresh exceeded 30 minutes.") from exc
+    except Exception as exc:
+        raise HTTPException(500, f"Unable to start local Scopus refresh: {exc}") from exc
+
+    output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
+    if completed.returncode != 0:
+        detail = output[-2500:] if output else "Local Scopus refresh failed."
+        raise HTTPException(502, detail)
+
+    # Force the app to reload the newly written master workbook.
+    global faculty_meta_cache
+    faculty_meta_cache = []
+    LIVE_CACHE.clear()
+    STATE.update({
+        "df": None,
+        "filename": None,
+        "mapping": {},
+        "faculty_meta": [],
+        "departments": [],
+        "overall": {},
+    })
+    load_master_dataset()
+
+    summary = {}
+    summary_file = BASE_DIR / "DSATM Scopus Master.xlsx"
+    try:
+        book = pd.ExcelFile(summary_file, engine="openpyxl")
+        if "Institution Sync Summary" in book.sheet_names:
+            sdf = pd.read_excel(book, sheet_name="Institution Sync Summary")
+            if not sdf.empty:
+                summary = {str(k): ("" if pd.isna(v) else v) for k, v in sdf.iloc[0].to_dict().items()}
+    except Exception:
+        summary = {}
+
+    return {
+        "success": True,
+        "mode": "local",
+        "message": "Local Scopus refresh completed. Master Excel and dashboard data were reloaded.",
+        "faculty_count": len(STATE.get("faculty_meta") or []),
+        "summary": summary,
+        "log_tail": output[-1600:],
+    }
+
 
 @app.post("/api/scopus/trigger-refresh")
 def trigger_scopus_github_action():

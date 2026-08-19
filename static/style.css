@@ -2664,3 +2664,104 @@ td {
   font-size: 8px;
   line-height: 1.4;
 }
+
+
+/* Institution publication trend controls */
+.trend-panel-head {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.summary-trend-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-left: auto;
+}
+
+.trend-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid #dfe7f1;
+  border-radius: 10px;
+  background: #f5f8fc;
+}
+
+.trend-toggle button,
+.trend-export-btn {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #63728a;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.trend-toggle button.active {
+  background: #176bd6;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(23, 107, 214, .18);
+}
+
+#trendYearSelect {
+  min-width: 82px;
+  height: 32px;
+  border: 1px solid #dfe7f1;
+  border-radius: 9px;
+  background: #fff;
+  color: #344764;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 8px;
+}
+
+.trend-export-btn {
+  border: 1px solid #dce6f3;
+  background: #fff;
+  color: #176bd6;
+  white-space: nowrap;
+}
+
+.trend-export-btn:hover {
+  background: #eef6ff;
+}
+
+@media (max-width: 1100px) {
+  .trend-panel-head {
+    flex-direction: column;
+  }
+
+  .summary-trend-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+}
+
+/* Clickable publication trend selection for detail export */
+#summaryYearBars .trend-selectable {
+  cursor: pointer;
+  padding: 6px 7px;
+  margin: 3px -7px;
+  border-radius: 9px;
+  transition: background .15s ease, box-shadow .15s ease;
+}
+
+#summaryYearBars .trend-selectable:hover {
+  background: #f2f7fd;
+}
+
+#summaryYearBars .trend-selectable.selected {
+  background: #eaf3ff;
+  box-shadow: inset 0 0 0 1px #bcd8fb;
+}
+
+#summaryYearBars .trend-selectable.selected .overview-bar-label span,
+#summaryYearBars .trend-selectable.selected .overview-bar-label b {
+  color: #176bd6;
+  font-weight: 800;
+}
